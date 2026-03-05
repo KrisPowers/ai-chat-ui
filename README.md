@@ -1,6 +1,6 @@
 # Larry AI - A Ollama Chat UI
 
-Larry AI is a local multi-panel chat UI for Ollama, built with React + TypeScript + Vite, for all types of working including coding, chat-bot expereinces, and creative work.
+Larry AI is a local multi-panel chat UI for Ollama, built with React + TypeScript + Vite, for all types of usage including coding, chat-bot expereinces, and creative work.
 
 ## Requirements
 
