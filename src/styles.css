@@ -236,7 +236,7 @@ html, body, #root {
   color: var(--muted);
   padding: 0 4px;
 }
-.msg.user .msg-label { color: var(--accent); }
+.msg.user .msg-label { color: var(--accent); align-self: flex-end; }
 .msg.assistant .msg-label { color: var(--accent2); }
 
 .msg-bubble {
@@ -258,6 +258,10 @@ html, body, #root {
   border: 1px solid var(--border);
   align-self: flex-start;
   width: 100%;
+}
+
+.msg.assistant {
+  margin-top: 15px;
 }
 
 .msg.assistant h3 {
@@ -306,9 +310,12 @@ html, body, #root {
   margin: 8px 0;
 }
 .msg-bubble hr { border: none; border-top: 1px solid var(--border-bright); margin: 10px 0; }
-.msg-bubble table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 11.5px; }
-.msg-bubble th, .msg-bubble td { border: 1px solid var(--border-bright); padding: 5px 8px; text-align: left; }
-.msg-bubble th { background: var(--surface); color: var(--accent2); }
+.msg-bubble table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11.5px; border: 1px solid var(--border-bright); border-radius: 6px; overflow: hidden; }
+.msg-bubble th, .msg-bubble td { border: 1px solid var(--border-bright); padding: 6px 10px; text-align: left; vertical-align: top; }
+.msg-bubble th { background: var(--surface); color: var(--accent2); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+.msg-bubble td { color: var(--text); }
+.msg-bubble tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+.msg-bubble td code { font-size: 10.5px; }
 
 /* ── CODE BLOCKS ── */
 .code-block-wrapper {
@@ -417,7 +424,6 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 5px;
-  margin-right: auto;
 }
 .line-count {
   color: var(--dim);
@@ -848,4 +854,148 @@ html, body, #root {
 .registry-tree-file:hover .registry-file-dl {
   opacity: 1;
   color: var(--accent2);
+}
+
+/* ── PRESET TABS ── */
+.preset-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+.preset-tab {
+  padding: 3px 9px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+.preset-tab:hover { color: var(--text); background: var(--border); }
+.preset-tab.active { background: var(--accent); color: #fff; }
+
+/* ── INPUT ACTION BUTTONS (upload / dir) ── */
+.input-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.input-action-btn {
+  width: 30px;
+  height: 30px;
+  background: var(--panel);
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all 0.12s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.input-action-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--border-bright); }
+.input-action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── DIFF METRICS IN CODE BLOCK HEADER ── */
+.diff-metrics {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+.diff-added  { color: #4ade80; }
+.diff-removed { color: #f87171; }
+.diff-sep { color: var(--dim); }
+.diff-new .diff-added { color: var(--accent2); }
+
+/* ── CODEX-STYLE CHANGE SUMMARY ── */
+.change-summary {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.change-summary-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.change-summary-icon {
+  font-style: normal;
+  color: var(--accent);
+}
+.change-pills {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.change-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  font-size: 11px;
+  transition: border-color 0.12s;
+}
+.change-pill:hover { border-color: var(--dim); }
+.change-pill-icon { font-size: 11px; flex-shrink: 0; opacity: 0.6; }
+.change-pill-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 1px;
+  overflow: hidden;
+}
+.change-pill-dir {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+.change-pill-name {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.change-pill-metrics {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+}
+.change-pill-new {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
 }

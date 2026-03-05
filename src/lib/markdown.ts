@@ -28,12 +28,17 @@ const DEFAULT_NAMES: Record<string, string> = {
 
 const FENCE_CONTAINING_LANGS = new Set(['md', 'markdown', 'text', 'txt', '']);
 
+export const SHELL_LANGS = new Set([
+  'bash', 'sh', 'shell', 'zsh', 'fish', 'bat', 'cmd', 'powershell', 'ps1',
+]);
+
 export interface CodeBlock {
   id: string;
   lang: string;
   ext: string;
   code: string;
   suggestedFilename: string;
+  isShell: boolean;
 }
 
 export interface ParsedContent {
@@ -58,22 +63,29 @@ function detectFilename(contextText: string, ext: string): string | null {
 }
 
 /**
- * Pre-processes raw AI output before line-by-line fence parsing.
+ * Preprocess: convert inline single-line triple-backtick spans to proper fenced blocks.
  *
- * Converts inline single-line triple-backtick spans into proper fenced blocks:
- *   ```bash npm install```   →   a real fenced block on its own lines
+ * Handles both forms the AI produces:
+ *   ```bash npm install```          — lang + space + content (original case)
+ *   ``` DISCORD_TOKEN=... ```       — no lang, just spaces around content
+ *   ```bash npm install discord```  — multi-word commands
  *
- * This is the primary source of stray backticks in rendered text — the AI
- * writes commands as inline spans rather than proper fenced blocks.
+ * The key fix vs the old regex: we now also match fences with NO lang tag but
+ * content surrounded by spaces/tabs (the ``` content ``` form), and we do NOT
+ * require at least one space — we just require the content has no newlines and
+ * isn't itself a bare fence opener (i.e. it must have non-backtick chars).
  */
 function preprocess(raw: string): string {
-  // Match: ```lang<space>content``` all on one line (no newline inside the content)
-  // Must have at least one space between lang/fence and content so we don't
-  // accidentally collapse a real opening fence that has trailing spaces.
-  return raw.replace(/```(\w*)[ \t]+([^`\n]+?)```/g, (_match, lang, code) => {
-    const l = lang.trim() || 'bash';
-    return `\n\`\`\`${l}\n${code.trim()}\n\`\`\`\n`;
+  // Form 1: ```lang content```  (lang word immediately after fence, space before content)
+  raw = raw.replace(/```(\w+)[ \t]+([^`\n]+?)[ \t]*```/g, (_m, lang, code) => {
+    return `\n\`\`\`${lang.trim()}\n${code.trim()}\n\`\`\`\n`;
   });
+  // Form 2: ``` content ```  (no lang, content wrapped in spaces)
+  // Must have at least one space on each side to avoid matching real fence openers
+  raw = raw.replace(/```[ \t]+([^`\n]+?)[ \t]*```/g, (_m, code) => {
+    return `\n\`\`\`bash\n${code.trim()}\n\`\`\`\n`;
+  });
+  return raw;
 }
 
 export function parseContent(raw: string): ParsedContent {
@@ -127,6 +139,7 @@ export function parseContent(raw: string): ParsedContent {
           lang, ext,
           code: codeLines.join('\n').replace(/\n$/, ''),
           suggestedFilename,
+          isShell: SHELL_LANGS.has(lang),
         },
       });
     } else {
@@ -151,27 +164,83 @@ export function renderInlineMarkdown(text: string): string {
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 }
 
+/**
+ * Renders a markdown table string into an HTML <table>.
+ * Input: the raw table lines (including separator row).
+ */
+function renderTable(lines: string[]): string {
+  // Filter out the separator row (---|--- pattern)
+  const rows = lines.filter(l => !/^\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/.test(l));
+  if (rows.length === 0) return '';
+
+  const parseRow = (line: string): string[] =>
+    line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+
+  const [headerRow, ...bodyRows] = rows;
+  const headers = parseRow(headerRow);
+
+  const thead = '<thead><tr>' +
+    headers.map(h => `<th>${renderInlineMarkdown(h)}</th>`).join('') +
+    '</tr></thead>';
+
+  const tbody = bodyRows.length
+    ? '<tbody>' +
+      bodyRows.map(row => {
+        const cells = parseRow(row);
+        return '<tr>' + cells.map(c => `<td>${renderInlineMarkdown(c)}</td>`).join('') + '</tr>';
+      }).join('') +
+      '</tbody>'
+    : '';
+
+  return `<table>${thead}${tbody}</table>`;
+}
+
 export function renderTextBlock(text: string): string {
-  // ── Pre-clean AI artifacts before HTML conversion ─────────────────────────
-
-  // 1. Strip FILE: annotation lines — already consumed by extractFilePath,
-  //    showing them in rendered text is just noise.
+  // ── Pre-clean AI artifacts ────────────────────────────────────────────────
   text = text.replace(/^(?:\/\/\s*|#\s*|<!--\s*)?FILE:\s*.+?(?:\s*-->)?\s*$/gm, '');
-
-  // 2. Strip lang-prefixed single-backtick spans the AI emits, e.g.:
-  //    `bash npm install discord.js`  →  `npm install discord.js`
-  //    `node src/index.js`            →  `src/index.js`  (node is the runner, not content)
-  //    We remove the leading lang keyword so the content renders as clean <code>.
   text = text.replace(
     /`(bash|sh|shell|node|python|py|js|ts|npm|npx|yarn|pnpm|cmd|powershell)\s+([^`\n]+)`/g,
     '`$2`'
   );
-
-  // 3. Remove stray lone backticks sitting on their own line (malformed fence remnants).
   text = text.replace(/^`{1,2}\s*$/gm, '');
 
-  // ── Standard markdown → HTML ──────────────────────────────────────────────
-  let html = text
+  // ── Extract tables BEFORE any escaping ───────────────────────────────────
+  // We pull each table out of the text entirely, render it to HTML, store in
+  // a map keyed by a safe placeholder token, then run all markdown processing
+  // on the remaining text. The real HTML is spliced back in at the very end,
+  // after all escaping is done, so angle brackets in table cells are safe.
+  const tableMap = new Map<string, string>();
+  let tableCounter = 0;
+
+  const inputLines = text.split('\n');
+  const processedLines: string[] = [];
+  let i = 0;
+
+  while (i < inputLines.length) {
+    const line = inputLines[i];
+    const isTableRow = /\|/.test(line);
+    const nextIsSep = i + 1 < inputLines.length &&
+      /^\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/.test(inputLines[i + 1]);
+
+    if (isTableRow && nextIsSep) {
+      const tableLines: string[] = [];
+      while (i < inputLines.length && /\|/.test(inputLines[i])) {
+        tableLines.push(inputLines[i]);
+        i++;
+      }
+      const token = `TABLETOK${tableCounter++}END`;
+      tableMap.set(token, renderTable(tableLines));
+      processedLines.push(token);
+    } else {
+      processedLines.push(line);
+      i++;
+    }
+  }
+
+  const cleaned = processedLines.join('\n');
+
+  // ── Standard markdown → HTML (only runs on non-table text) ───────────────
+  let html = cleaned
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -184,7 +253,6 @@ export function renderTextBlock(text: string): string {
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/_(.+?)_/g, '<em>$1</em>')
-    // Inline code — allow anything except newlines inside backticks
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/^[\*\-] (.+)$/gm, '<li>$1</li>')
     .replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
@@ -195,6 +263,13 @@ export function renderTextBlock(text: string): string {
   html = html.replace(/<p>\s*<\/p>/g, '');
   html = html.replace(/<p>(<(?:h[123]|ul|ol|div|blockquote|hr|pre))/g, '$1');
   html = html.replace(/(<\/(?:h[123]|ul|ol|div|blockquote|hr|pre)>)<\/p>/g, '$1');
+
+  // ── Splice table HTML back in (token placeholders were never escaped) ─────
+  for (const [token, tableHtml] of tableMap) {
+    // The token may be wrapped in <p>...</p> from the paragraph pass — unwrap it
+    html = html.replace(new RegExp(`<p>${token}</p>`, 'g'), tableHtml);
+    html = html.replace(new RegExp(token, 'g'), tableHtml);
+  }
 
   return html;
 }
@@ -235,6 +310,7 @@ export function extractCodeBlocksForRegistry(
   const { parts } = parseContent(raw);
   return parts
     .filter((p): p is { type: 'code'; block: CodeBlock } => p.type === 'code')
+    .filter(p => !p.block.isShell)
     .map(p => ({
       path: extractFilePath(p.block.code, p.block.suggestedFilename),
       content: stripFileComment(p.block.code),

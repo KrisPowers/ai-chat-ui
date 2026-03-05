@@ -2,13 +2,17 @@ import React, { useState } from 'react';
 import type { FileRegistry } from '../lib/fileRegistry';
 import { downloadRegistryAsZip } from '../lib/zip';
 import { useToast } from '../hooks/useToast';
+import {
+  IconChevronDown, IconChevronUp, IconChevronRight,
+  IconFolder, IconFolderOpen, IconFileText,
+  IconDownload, IconArchive,
+} from './Icon';
 
 interface Props {
   registry: FileRegistry;
   chatTitle: string;
 }
 
-// Build a simple tree structure from flat paths
 interface TreeNode {
   name: string;
   path: string;
@@ -18,16 +22,13 @@ interface TreeNode {
 
 function buildTree(paths: string[]): TreeNode[] {
   const root: TreeNode[] = [];
-
   for (const path of paths.sort()) {
     const parts = path.split('/');
     let level = root;
-
     for (let i = 0; i < parts.length; i++) {
       const name = parts[i];
       const isDir = i < parts.length - 1;
       let node = level.find(n => n.name === name);
-
       if (!node) {
         node = { name, path: parts.slice(0, i + 1).join('/'), isDir, children: [] };
         level.push(node);
@@ -35,7 +36,6 @@ function buildTree(paths: string[]): TreeNode[] {
       level = node.children;
     }
   }
-
   return root;
 }
 
@@ -62,8 +62,12 @@ function TreeItem({ node, registry, depth }: { node: TreeNode; registry: FileReg
           style={{ paddingLeft: depth * 12 + 6 }}
           onClick={() => setOpen(o => !o)}
         >
-          <span className="registry-tree-arrow">{open ? '▾' : '▸'}</span>
-          <span className="registry-tree-icon">📁</span>
+          <span className="registry-tree-arrow">
+            <IconChevronRight size={10} style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+          </span>
+          <span className="registry-tree-icon">
+            {open ? <IconFolderOpen size={13} /> : <IconFolder size={13} />}
+          </span>
           <span className="registry-tree-name">{node.name}</span>
         </div>
         {open && node.children.map(child => (
@@ -75,9 +79,11 @@ function TreeItem({ node, registry, depth }: { node: TreeNode; registry: FileReg
 
   return (
     <div className="registry-tree-file" style={{ paddingLeft: depth * 12 + 6 }}>
-      <span className="registry-tree-icon">📄</span>
+      <span className="registry-tree-icon"><IconFileText size={13} /></span>
       <span className="registry-tree-name">{node.name}</span>
-      <button className="registry-file-dl" onClick={handleDownload} title={`Download ${node.name}`}>↓</button>
+      <button className="registry-file-dl" onClick={handleDownload} title={`Download ${node.name}`}>
+        <IconDownload size={11} />
+      </button>
     </div>
   );
 }
@@ -108,9 +114,11 @@ export function FileRegistryPanel({ registry, chatTitle }: Props) {
           onClick={e => { e.stopPropagation(); handleZipDownload(); }}
           title="Download all as .zip"
         >
-          ZIP
+          <IconArchive size={11} /> ZIP
         </button>
-        <span className="registry-chevron">{open ? '▴' : '▾'}</span>
+        <span className="registry-chevron">
+          {open ? <IconChevronUp size={12} /> : <IconChevronDown size={12} />}
+        </span>
       </div>
       {open && (
         <div className="registry-tree">

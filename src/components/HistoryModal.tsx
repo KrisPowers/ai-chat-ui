@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { ChatRecord, Panel } from '../types';
+import type { ChatRecord } from '../types';
+import { IconX, IconMessageSquare, IconTrash2, IconMenu } from './Icon';
 
 interface Props {
   chats: ChatRecord[];
@@ -50,7 +51,9 @@ export function HistoryModal({ chats, openPanelIds, onOpen, onDelete, onClearAll
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <button className="panel-btn close" onClick={onClose} title="Close">✕</button>
+          <button className="panel-btn close" onClick={onClose} title="Close">
+            <IconX size={13} />
+          </button>
         </div>
 
         <div id="history-list">
@@ -73,7 +76,9 @@ export function HistoryModal({ chats, openPanelIds, onOpen, onDelete, onClearAll
                   className={`history-item${isOpen ? ' active' : ''}`}
                   onClick={() => onOpen(chat)}
                 >
-                  <div className="history-item-icon">💬</div>
+                  <div className="history-item-icon">
+                    <IconMessageSquare size={15} />
+                  </div>
                   <div className="history-item-info">
                     <div className="history-item-name">{chat.title || 'Untitled'}</div>
                     <div className="history-item-date">
@@ -94,7 +99,7 @@ export function HistoryModal({ chats, openPanelIds, onOpen, onDelete, onClearAll
                     title="Delete"
                     onClick={(e) => { e.stopPropagation(); onDelete(chat.id); }}
                   >
-                    ✕
+                    <IconX size={11} />
                   </button>
                 </div>
               );
@@ -106,7 +111,9 @@ export function HistoryModal({ chats, openPanelIds, onOpen, onDelete, onClearAll
           <span id="history-count">
             {filtered.length} chat{filtered.length !== 1 ? 's' : ''}
           </span>
-          <button className="btn danger" onClick={handleClearAll}>🗑 Clear All</button>
+          <button className="btn danger" onClick={handleClearAll}>
+            <IconTrash2 size={12} /> Clear All
+          </button>
         </div>
       </div>
     </div>

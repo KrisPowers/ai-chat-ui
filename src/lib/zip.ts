@@ -1,20 +1,11 @@
-/**
- * zip.ts — Builds a downloadable .zip from the FileRegistry using fflate.
- *
- * fflate is a pure-JS zip/deflate library (~30kb), no WASM, no server needed.
- * Each FileEntry becomes a zip entry at its full relative path, preserving
- * the directory structure the AI emitted.
- */
-import { zipSync, strToU8 } from 'fflate';
+import { zipSync, strToU8, unzipSync } from 'fflate';
 import type { FileRegistry } from './fileRegistry';
 
 export function downloadRegistryAsZip(registry: FileRegistry, zipName = 'project.zip'): void {
   if (registry.size === 0) return;
 
   const files: Record<string, Uint8Array> = {};
-
   for (const entry of registry.values()) {
-    // fflate uses forward slashes; normalise any backslashes just in case
     const path = entry.path.replace(/\\/g, '/').replace(/^\//, '');
     files[path] = strToU8(entry.content);
   }
@@ -27,4 +18,24 @@ export function downloadRegistryAsZip(registry: FileRegistry, zipName = 'project
   a.download = zipName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/** 
+ * Reads a .zip Uint8Array and returns flat path→text entries.
+ * Used when the user uploads a zip as project context.
+ */
+export function readZipEntries(data: Uint8Array): Array<{ path: string; content: string }> {
+  const unzipped = unzipSync(data);
+  const results: Array<{ path: string; content: string }> = [];
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+
+  for (const [path, bytes] of Object.entries(unzipped)) {
+    // Skip directories and binary files (detect by null bytes heuristic)
+    if (path.endsWith('/')) continue;
+    const content = decoder.decode(bytes);
+    if (content.includes('\0')) continue; // binary — skip
+    results.push({ path, content });
+  }
+
+  return results;
 }

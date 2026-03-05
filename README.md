@@ -68,3 +68,15 @@ src/
   main.tsx
   styles.css
 ```
+
+## Roadmap
+
+- Add custom skill/context presets, that can be selected chat-by-chat like the model. Presets are hard-coded, and can be modified via the source files. The preset selected would pretty much just turn BASE_SYSTEM_PROMPT into it's content.
+  - Code Preset
+  - Chatbot Preset
+  - Creative Preset
+- Add a file-upload button, that permits all file types, including zips.
+- Add addition/delete metrics into code-snippets (+100 / -55).
+- Add a project directory button (set to a chat), to select a directory for the AI Charbot to focus on, to edit, improve, etc. This would input the directories files that the user selects, into the project files section.
+- Remove file's being printed at the end of each message, instead, use Codex style of referencing the file & it's directory, and how many changes it made (addition/delete metrics)
+- Ensure that the Code preset instructs the AI to provide an overview of the changes made, a change-log at the end of any message that changes any files.
