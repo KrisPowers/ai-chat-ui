@@ -72,6 +72,22 @@ export default function App() {
     setHistoryOpen(false);
   }
 
+  function handleImportChat(chat: ChatRecord) {
+    // Save the imported chat to DB, then open it
+    save({
+      id: chat.id,
+      title: chat.title,
+      model: chat.model,
+      preset: chat.preset,
+      messages: chat.messages,
+      updatedAt: chat.updatedAt,
+      fileEntries: chat.fileEntries ?? [],
+    });
+    createPanel(chat);
+    setHistoryOpen(false);
+    toast(`Imported "${chat.title}"`);
+  }
+
   async function handleDeleteChat(id: string) {
     await remove(id);
     closePanel(id);
@@ -139,6 +155,7 @@ export default function App() {
           onDelete={handleDeleteChat}
           onClearAll={handleClearAll}
           onClose={() => setHistoryOpen(false)}
+          onImport={handleImportChat}
         />
       )}
     </div>

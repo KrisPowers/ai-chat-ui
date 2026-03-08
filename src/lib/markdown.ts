@@ -384,7 +384,11 @@ export function renderInlineMarkdown(text: string): string {
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/_(.+?)_/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>');
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Markdown links: [text](url)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    // Auto-link bare URLs
+    .replace(/(?<![="'])https?:\/\/[^\s<>"')]+/g, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
 }
 
 /**
@@ -480,7 +484,14 @@ export function renderTextBlock(text: string): string {
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/_(.+?)_/g, '<em>$1</em>')
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    // Markdown links must be handled AFTER & escaping but before list/paragraph processing
+    // We use a placeholder to protect href content from further escaping
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    // Auto-link bare URLs not already inside an <a href=
+    .replace(/(?<!href=")https?:\/\/[^\s<>"')]+/g, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`)
     .replace(/^[\*\-] (.+)$/gm, '<li>$1</li>')
+    // Indented list items (e.g. "  - item" used in README / docs sections)
+    .replace(/^ {1,3}[\*\-] (.+)$/gm, '<li>$1</li>')
     .replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
 
   html = html.replace(/(<li>[\s\S]*?<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);

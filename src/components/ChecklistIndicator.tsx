@@ -1,13 +1,41 @@
 // FILE: src/components/ChecklistIndicator.tsx
 import React from 'react';
 import { IconCheck, IconCode2, IconListChecks } from './Icon';
-import type { DeepStep } from '../lib/deepPlanner';
+import type { DeepStep, RequestMode } from '../lib/deepPlanner';
+
+const MODE_LABELS: Record<RequestMode, string> = {
+  complete_project:    'New Project',
+  feature_build:       'Feature Build',
+  feature_integration: 'Integration',
+  debug:               'Debug',
+  refactor:            'Refactor',
+  explain:             'Explain',
+  edit_file:           'Edit',
+  docs_only:           'Docs',
+  add_files:           'Add Files',
+};
+
+const MODE_COLORS: Record<RequestMode, string> = {
+  complete_project:    'var(--accent)',
+  feature_build:       'var(--accent2)',
+  feature_integration: '#a78bfa',
+  debug:               'var(--danger)',
+  refactor:            'var(--accent3)',
+  explain:             'var(--muted)',
+  edit_file:           'var(--accent2)',
+  docs_only:           '#34d399',
+  add_files:           '#fb923c',
+};
 
 interface Props {
   steps: DeepStep[];
   /** 0 = planning not done yet, 1+ = step currently executing (1-based) */
   currentStep: number;
   isPlanning: boolean;
+  /** Classification mode — shown as a badge in the header */
+  mode?: RequestMode;
+  /** True while classification is running (before planning starts) */
+  isClassifying?: boolean;
 }
 
 /**
@@ -15,13 +43,29 @@ interface Props {
  * Steps that are done get a check. The active step pulses. Future steps
  * are dimmed. Mimics a todo-list style progress view.
  */
-export function ChecklistIndicator({ steps, currentStep, isPlanning }: Props) {
+export function ChecklistIndicator({ steps, currentStep, isPlanning, mode, isClassifying }: Props) {
+  if (isClassifying) {
+    return (
+      <div className="checklist-indicator">
+        <div className="checklist-header">
+          <div className="thinking-dots"><span /><span /><span /></div>
+          <span className="checklist-header-label">Analysing request…</span>
+        </div>
+      </div>
+    );
+  }
+
   if (isPlanning) {
     return (
       <div className="checklist-indicator">
         <div className="checklist-header">
           <div className="thinking-dots"><span /><span /><span /></div>
           <span className="checklist-header-label">Building implementation plan…</span>
+          {mode && (
+            <span className="checklist-mode-badge" style={{ background: `color-mix(in srgb, ${MODE_COLORS[mode]} 15%, transparent)`, color: MODE_COLORS[mode], borderColor: `color-mix(in srgb, ${MODE_COLORS[mode]} 35%, transparent)` }}>
+              {MODE_LABELS[mode]}
+            </span>
+          )}
         </div>
       </div>
     );
@@ -34,6 +78,11 @@ export function ChecklistIndicator({ steps, currentStep, isPlanning }: Props) {
         <span className="checklist-header-label">
           Step {Math.min(currentStep, steps.length)} of {steps.length}
         </span>
+        {mode && (
+          <span className="checklist-mode-badge" style={{ background: `color-mix(in srgb, ${MODE_COLORS[mode]} 15%, transparent)`, color: MODE_COLORS[mode], borderColor: `color-mix(in srgb, ${MODE_COLORS[mode]} 35%, transparent)` }}>
+            {MODE_LABELS[mode]}
+          </span>
+        )}
         <span className="checklist-progress-text">
           {currentStep > steps.length ? 'complete' : steps[currentStep - 1]?.filePath ?? ''}
         </span>
@@ -43,7 +92,6 @@ export function ChecklistIndicator({ steps, currentStep, isPlanning }: Props) {
         {steps.map(step => {
           const done   = step.stepNumber < currentStep;
           const active = step.stepNumber === currentStep;
-          const future = step.stepNumber > currentStep;
 
           return (
             <div

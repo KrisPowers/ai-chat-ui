@@ -16,6 +16,9 @@ interface Props {
   currentRegistry?: FileRegistry;
   model?: string;
   hideCodeBlocks?: boolean;
+  /** When true, never show the NoCodeWarning even if the pattern fires.
+   *  Used for Chatbot/Creative presets where a code-only response is normal. */
+  suppressNoCodeWarning?: boolean;
 }
 
 function detectFakeCompletion(content: string, fileBlockCount: number): boolean {
@@ -99,6 +102,7 @@ export function MessageBubble({
   currentRegistry,
   model,
   hideCodeBlocks = false,
+  suppressNoCodeWarning = false,
 }: Props) {
   const isUser = message.role === 'user';
 
@@ -140,6 +144,7 @@ export function MessageBubble({
 
   const isFakeCompletion =
     !isUser &&
+    !suppressNoCodeWarning &&
     withDownload &&
     detectFakeCompletion(cleanedFull, fileBlocks.length);
 

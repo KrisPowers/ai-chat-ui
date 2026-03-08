@@ -147,3 +147,11 @@ export function IconCode2(p: SVGProps) {
 export function IconListChecks(p: SVGProps) {
   return <Svg {...p}><path d="M11 17H19"/><path d="M11 12H19"/><path d="M11 7H19"/><polyline points="4 7 5.5 8.5 8 6"/><polyline points="4 12 5.5 13.5 8 11"/><polyline points="4 17 5.5 18.5 8 16"/></Svg>;
 }
+
+export function IconLink(p: SVGProps) {
+  return <Svg {...p}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></Svg>;
+}
+
+export function IconUpload(p: SVGProps) {
+  return <Svg {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></Svg>;
+}

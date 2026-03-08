@@ -312,6 +312,16 @@ html, body, #root {
   margin: 8px 0;
 }
 .msg-bubble hr { border: none; border-top: 1px solid var(--border-bright); margin: 10px 0; }
+.msg-bubble a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  transition: color 0.12s, border-color 0.12s;
+}
+.msg-bubble a:hover {
+  color: #9984ff;
+  border-bottom-color: #9984ff;
+}
 .msg-bubble table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11.5px; border: 1px solid var(--border-bright); border-radius: 6px; overflow: hidden; }
 .msg-bubble th, .msg-bubble td { border: 1px solid var(--border-bright); padding: 6px 10px; text-align: left; vertical-align: top; }
 .msg-bubble th { background: var(--surface); color: var(--accent2); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
@@ -858,30 +868,125 @@ html, body, #root {
   color: var(--accent2);
 }
 
-/* ── PRESET TABS ── */
-.preset-tabs {
-  display: flex;
-  gap: 2px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 2px;
-  flex-shrink: 0;
-}
-.preset-tab {
-  padding: 3px 9px;
-  border-radius: 5px;
-  border: none;
-  background: transparent;
-  color: var(--muted);
+/* ── PRESET SELECT (dropdown — replaces tab strip) ── */
+.preset-select {
+  background: var(--panel);
+  border: 1px solid var(--border-bright);
+  color: var(--text);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
+  padding: 3px 6px;
+  border-radius: 5px;
   cursor: pointer;
-  transition: all 0.12s;
-  white-space: nowrap;
+  max-width: 90px;
+  transition: border-color 0.15s, color 0.15s;
+  flex-shrink: 0;
 }
-.preset-tab:hover { color: var(--text); background: var(--border); }
-.preset-tab.active { background: var(--accent); color: #fff; }
+.preset-select:hover, .preset-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* keep old tab CSS around in case it's referenced elsewhere, but hidden */
+.preset-tabs { display: none; }
+.preset-tab  { display: none; }
+
+/* ── URL FETCH BAR ── */
+.url-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  animation: slideDown 0.15s ease;
+}
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.url-bar-input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border-bright);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  transition: border-color 0.15s;
+}
+.url-bar-input:focus { outline: none; border-color: var(--accent); }
+.url-bar-input::placeholder { color: var(--dim); }
+.url-bar-input:disabled { opacity: 0.5; }
+.url-bar-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.url-bar-btn:hover { background: #9984ff; }
+.url-bar-btn:disabled { background: var(--dim); border-color: var(--dim); cursor: not-allowed; }
+
+/* ── FETCHED CONTEXT BADGES ── */
+.fetched-contexts-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.fetched-context-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-bright));
+  border-radius: 20px;
+  font-size: 10px;
+  color: var(--text);
+  max-width: 220px;
+}
+.fetched-context-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.fetched-context-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transition: color 0.12s;
+}
+.fetched-context-remove:hover { color: var(--danger); }
+
+/* ── INPUT ACTION ACTIVE STATE ── */
+.input-action-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+}
 
 /* ── INPUT ACTION BUTTONS (upload / dir) ── */
 .input-actions {
@@ -1202,6 +1307,19 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 200px;
+}
+
+/* ── Request mode badge inside checklist header ── */
+.checklist-mode-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .checklist-steps {

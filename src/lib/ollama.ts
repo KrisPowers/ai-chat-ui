@@ -1,7 +1,12 @@
 // FILE: src/lib/ollama.ts
 import type { Message } from '../types';
 
-export const OLLAMA_BASE = 'http://localhost:11434';
+// Allow the Ollama server URL to be configured via .env / .env.local.
+// Default falls back to the standard local address so zero configuration
+// is needed for the most common setup.
+export const OLLAMA_BASE: string =
+  (import.meta.env?.VITE_OLLAMA_BASE as string | undefined)?.replace(/\/$/, '') ??
+  'http://localhost:11434';
 
 export async function fetchModels(): Promise<string[]> {
   const res = await fetch(`${OLLAMA_BASE}/api/tags`, {

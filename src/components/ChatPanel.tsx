@@ -4,16 +4,17 @@ import { MessageBubble } from './MessageBubble';
 import { FileRegistryPanel } from './FileRegistryPanel';
 import { ChecklistIndicator } from './ChecklistIndicator';
 import { streamChat } from '../lib/ollama';
-import { buildDeepPlan, buildStepUserMessage, getStepExecutorSystem, buildSummaryUserMessage, getSummarySystem } from '../lib/deepPlanner';
+import { buildDeepPlan, buildStepUserMessage, getStepExecutorSystem, buildSummaryUserMessage, getSummarySystem, packageVersionsToSystemInject } from '../lib/deepPlanner';
 import type { DeepStep } from '../lib/deepPlanner';
 import { updateRegistry, registryToSystemPrompt } from '../lib/fileRegistry';
 import { extractCodeBlocksForRegistry } from '../lib/markdown';
+import { fetchUrlsFromPrompt, fetchGlobalContext, urlContextToSystemInject, globalContextToSystemInject, globalContextToConversationInject, contextsToSystemInject } from '../lib/fetcher';
+import type { FetchedContext } from '../lib/fetcher';
 import { PRESETS, getPreset, DEFAULT_PRESET_ID } from '../lib/presets';
 import { readZipEntries } from '../lib/zip';
 import {
   IconSend, IconStop, IconRotateCcw, IconX,
   IconPaperclip, IconFolder, IconHexagon,
-  IconCode2, IconMessageSquare, IconSparkles,
   IconDownload,
 } from './Icon';
 import type { Panel, Message } from '../types';
@@ -38,12 +39,6 @@ function langFromPath(path: string): string {
   };
   return map[ext] ?? ext ?? 'text';
 }
-
-const PRESET_ICONS: Record<string, React.ReactNode> = {
-  code:     <IconCode2 size={12} />,
-  chatbot:  <IconMessageSquare size={12} />,
-  creative: <IconSparkles size={12} />,
-};
 
 function exportChatAsMarkdown(panel: Panel): string {
   const date = new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -71,6 +66,8 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
   const [checklistSteps,       setChecklistSteps]       = useState<DeepStep[]>([]);
   const [checklistCurrentStep, setChecklistCurrentStep] = useState(0);
   const [checklistPlanning,    setChecklistPlanning]     = useState(false);
+  const [checklistClassifying, setChecklistClassifying] = useState(false);
+  const [checklistMode,        setChecklistMode]        = useState<import('../lib/deepPlanner').RequestMode | undefined>();
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -82,6 +79,8 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
       setChecklistSteps([]);
       setChecklistCurrentStep(0);
       setChecklistPlanning(false);
+      setChecklistClassifying(false);
+      setChecklistMode(undefined);
     }
   }, [panel.streaming]);
 
@@ -94,7 +93,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
     URL.revokeObjectURL(a.href);
   }
 
-  // ── Send ──────────────────────────────────────────────────────────────────
+  // ── Send ────────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const text = inputValue.trim();
     if (!text || panel.streaming) return;
@@ -112,19 +111,53 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
       streaming: true,
       streamingContent: '',
       prevRegistry: snapshotRegistry,
-      streamingPhase: { label: 'Planning…', stepIndex: 0, totalSteps: 0 },
+      streamingPhase: { label: 'Fetching context…', stepIndex: 0, totalSteps: 0 },
     });
 
     const abort = new AbortController();
     abortRef.current = abort;
 
-    // ── Non-code presets — single pass ────────────────────────────────────
+    // ── Auto-fetch: URLs in the prompt + global knowledge sources ───────────
+    // Pass the full conversation history so follow-up questions ("what is the
+    // US involvement?") can inherit topics from prior messages ("Iran").
+    // Global context is injected BOTH into the system prompt AND as a synthetic
+    // assistant prefill turn in the conversation, so even small models that
+    // deprioritise system prompts will see and use the live data.
+    let urlInject    = '';
+    let globalInject = '';
+    let contextTurns: Array<{ role: string; content: string }> = [];
+    try {
+      const [promptContexts, globalContexts] = await Promise.all([
+        fetchUrlsFromPrompt(text),
+        isCodePreset ? Promise.resolve([]) : fetchGlobalContext(text, panel.messages),
+      ]);
+      urlInject    = urlContextToSystemInject(promptContexts);
+      globalInject = globalContextToSystemInject(globalContexts);
+      contextTurns = globalContextToConversationInject(globalContexts, text);
+    } catch { /* network failure is non-fatal */ }
+
+    // ── Non-code presets — single pass ──────────────────────────────────────
     if (!isCodePreset) {
-      const preset       = getPreset(presetId);
-      const systemPrompt = preset.systemPrompt + registryToSystemPrompt(panel.fileRegistry);
-      let accumulated    = '';
+      const preset = getPreset(presetId);
+      const systemPrompt = preset.systemPrompt
+        + registryToSystemPrompt(panel.fileRegistry)
+        + urlInject
+        + globalInject;
+
+      // Build the message array: history + [assistant context prefill] + user message.
+      // The context prefill makes the model "own" the research and answer from it
+      // rather than ignoring it. It's positioned as the last assistant turn so the
+      // model continues naturally from "Based on the above, I will now answer..."
+      const priorHistory = updatedMessages.slice(0, -1); // everything before the new user msg
+      const messagesWithContext = [
+        ...priorHistory,
+        ...contextTurns,   // synthetic assistant turn with live research
+        userMsg,           // the user's actual question
+      ];
+
+      let accumulated = '';
       try {
-        const gen = streamChat(modelName, updatedMessages, systemPrompt, abort.signal);
+        const gen = streamChat(modelName, messagesWithContext, systemPrompt, abort.signal);
         for await (const chunk of gen) {
           accumulated += chunk;
           onUpdate(panel.id, { streamingContent: accumulated, streamingPhase: null });
@@ -136,28 +169,32 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
       return;
     }
 
-    // ── Code preset: plan → execute each step independently ──────────────
+    // ── Code preset: plan → execute each step independently ─────────────────
     try {
-      // ── Phase 1: planning ────────────────────────────────────────────────
-      setChecklistPlanning(true);
+      setChecklistClassifying(true);
+      setChecklistPlanning(false);
       setChecklistSteps([]);
       setChecklistCurrentStep(0);
+      onUpdate(panel.id, { streamingPhase: { label: 'Analysing request…', stepIndex: 0, totalSteps: 0 } });
 
       const plan = await buildDeepPlan(text, panel.messages, modelName, abort.signal);
 
+      setChecklistClassifying(false);
       setChecklistPlanning(false);
+      setChecklistMode(plan.mode);
       setChecklistSteps(plan.steps);
       setChecklistCurrentStep(1);
 
-      // Executor system prompt — lean, code-first, no prose-before-code rules
+      const pkgVersionInject = packageVersionsToSystemInject(plan.resolvedPackages ?? []);
       const executorSystem = getStepExecutorSystem()
-        + registryToSystemPrompt(panel.fileRegistry);
+        + registryToSystemPrompt(panel.fileRegistry)
+        + urlInject
+        + pkgVersionInject;
 
       let combinedContent = '';
       let currentRegistry = panel.fileRegistry;
       const alreadyWritten: Array<{ path: string; exports: string[] }> = [];
 
-      // ── Phase 2: one request per step ────────────────────────────────────
       for (let si = 0; si < plan.steps.length; si++) {
         const step = plan.steps[si];
         setChecklistCurrentStep(si + 1);
@@ -170,15 +207,8 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
           },
         });
 
-        // Each step is a fresh conversation: system = executor rules,
-        // user turn = original request + project context + this file's spec.
-        // Keeping the conversation short prevents context-window overflow and
-        // stops the model from being distracted by earlier code output.
         const stepUserMsg = buildStepUserMessage(plan, step, alreadyWritten);
-
         const stepMessages: Message[] = [
-          // Always include the original user request so the model understands
-          // the broader goal, then the specific step instruction
           { role: 'user', content: text },
           { role: 'assistant', content: `Understood. I will implement the project step by step. Starting step ${si + 1}: ${step.filePath}` },
           { role: 'user', content: stepUserMsg },
@@ -191,7 +221,6 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
           onUpdate(panel.id, { streamingContent: combinedContent + stepContent });
         }
 
-        // Update registry so subsequent steps can reference written files
         const newBlocks = extractCodeBlocksForRegistry(stepContent);
         currentRegistry = updateRegistry(currentRegistry, newBlocks, updatedMessages.length);
         for (const b of newBlocks) {
@@ -207,8 +236,6 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
 
       setChecklistCurrentStep(plan.steps.length + 1);
 
-      // ── Phase 3: automatic summary follow-up ─────────────────────────────
-      // Build the list of files the model actually wrote (from the registry)
       const filesWritten = [...currentRegistry.values()].map(e => ({ path: e.path }));
 
       onUpdate(panel.id, {
@@ -238,8 +265,6 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
     } catch (err) {
       handleError(err, updatedMessages);
     }
-
-    // ── Helpers ────────────────────────────────────────────────────────────
 
     async function finaliseResponse(
       content: string,
@@ -293,7 +318,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
 
   }, [inputValue, panel, models, onUpdate, onSave]);
 
-  // ── File / dir upload ─────────────────────────────────────────────────────
+  // ── File / dir upload ──────────────────────────────────────────────────────
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     if (!files.length) return;
@@ -366,9 +391,9 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }
 
-  const currentPreset   = panel.preset ?? DEFAULT_PRESET_ID;
-  const isCodeStreaming  = panel.streaming && currentPreset === 'code';
-  const hasMessages      = panel.messages.length > 0;
+  const currentPreset  = panel.preset ?? DEFAULT_PRESET_ID;
+  const isCodeStreaming = panel.streaming && currentPreset === 'code';
+  const hasMessages     = panel.messages.length > 0;
 
   return (
     <div className="chat-panel">
@@ -390,18 +415,19 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
             : models.map(m => <option key={m} value={m}>{m}</option>)
           }
         </select>
-        <div className="preset-tabs">
+
+        {/* Preset as compact dropdown */}
+        <select
+          className="preset-select"
+          value={currentPreset}
+          onChange={e => handlePresetChange(e.target.value)}
+          title="Switch preset"
+        >
           {PRESETS.map(p => (
-            <button
-              key={p.id}
-              className={`preset-tab${currentPreset === p.id ? ' active' : ''}`}
-              onClick={() => handlePresetChange(p.id)}
-              title={p.label}
-            >
-              {PRESET_ICONS[p.id]} {p.label}
-            </button>
+            <option key={p.id} value={p.id}>{p.label}</option>
           ))}
-        </div>
+        </select>
+
         {hasMessages && (
           <button className="panel-btn" onClick={handleExportLog} title="Export chat log as Markdown">
             <IconDownload size={13} />
@@ -435,6 +461,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
                   currentRegistry={panel.fileRegistry}
                   model={panel.model}
                   hideCodeBlocks={isCodeAssistant}
+                  suppressNoCodeWarning={currentPreset !== 'code'}
                 />
               );
             })}
@@ -447,6 +474,8 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
                       steps={checklistSteps}
                       currentStep={checklistCurrentStep}
                       isPlanning={checklistPlanning}
+                      isClassifying={checklistClassifying}
+                      mode={checklistMode}
                     />
                   </div>
                 )}
@@ -454,12 +483,6 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
                 {panel.streamingContent ? (
                   <div className="streaming-wrap">
                     {(() => {
-                      // During code preset streaming, suppress the bubble entirely
-                      // until the summary marker arrives — the checklist is the
-                      // only visible indicator during the step phase.
-                      // Once the summary starts, MessageBubble handles the split
-                      // internally (full content for file pills, display portion
-                      // for prose rendering).
                       const summaryMarker = '\n\n<!-- summary -->\n\n';
                       const hasSummary = isCodeStreaming &&
                         panel.streamingContent.includes(summaryMarker);
@@ -472,6 +495,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
                           currentRegistry={panel.fileRegistry}
                           model={panel.model}
                           hideCodeBlocks={isCodeStreaming}
+                          suppressNoCodeWarning={true}
                         />
                       );
                     })()}
@@ -509,7 +533,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave }: Props) {
             ref={inputRef}
             className="msg-input"
             rows={1}
-            placeholder="Ask anything… (Shift+Enter for newline)"
+            placeholder="Ask anything… paste a URL and it'll be fetched automatically. Shift+Enter for newline."
             value={inputValue}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
