@@ -31,6 +31,29 @@ export function extractUrlsFromText(text: string): string[] {
   return [...new Set(cleaned)];
 }
 
+const CASUAL_QUERY_RE = /^(hi|hello|hey|yo|sup|good\s+(morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|who are you|what can you do|how are you|help|help me|test)\W*$/i;
+
+export function shouldFetchGlobalContext(
+  userMessage: string,
+  conversationHistory: Array<{ role: string; content: string }> = [],
+): boolean {
+  const trimmed = userMessage.trim();
+  if (!trimmed) return false;
+  if (extractUrlsFromText(trimmed).length > 0) return false;
+  if (CASUAL_QUERY_RE.test(trimmed) && trimmed.length <= 80) return false;
+
+  const recentHistory = conversationHistory
+    .slice(-6)
+    .map(m => m.content)
+    .join(' ');
+  const combined = `${recentHistory} ${trimmed}`.trim();
+  const hasLiveIntent = LIVE_QUERY_RE.test(combined);
+  const mentionsTrackedRegions = [...combined.matchAll(COUNTRY_RE)].length > 0;
+  const hasLookupIntent = /\b(search|look up|lookup|find|research|check|browse)\b/i.test(trimmed);
+
+  return hasLiveIntent || (mentionsTrackedRegions && hasLookupIntent);
+}
+
 export async function fetchUrlsFromPrompt(promptText: string): Promise<FetchedContext[]> {
   const urls = extractUrlsFromText(promptText);
   if (!urls.length) return [];
@@ -620,7 +643,7 @@ export function globalContextToSystemInject(contexts: FetchedContext[]): string 
 export function globalContextToConversationInject(
   contexts: FetchedContext[],
   userMessage: string,
-): Array<{ role: string; content: string }> {
+): Array<{ role: 'assistant'; content: string }> {
   if (!contexts.length) return [];
 
   const timestamp = new Date().toUTCString();

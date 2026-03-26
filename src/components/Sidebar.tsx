@@ -1,35 +1,26 @@
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { ChatRecord, ProjectFolder } from '../types';
 import {
-  IconChevronDown,
-  IconChevronRight,
   IconFolder,
   IconFolderOpen,
-  IconMenu,
+  IconFolderPlus,
   IconMessageSquare,
-  IconPlus,
+  IconSettings,
   IconTrash2,
-  IconUpload,
 } from './Icon';
 
 interface Props {
-  collapsed: boolean;
   view: 'chats' | 'settings';
   folders: ProjectFolder[];
   chats: ChatRecord[];
   openPanelIds: string[];
   status: 'connecting' | 'online' | 'error';
-  statusLabel: string;
-  onToggleCollapsed: () => void;
   onChangeView: (view: 'chats' | 'settings') => void;
-  onCreateFolder: () => void;
+  onOpenWorkspaceLauncher: () => void;
   onCreateChatInFolder: (folder: { id: string; label: string }) => void;
-  onCreateChat: () => void;
   onOpenChat: (chat: ChatRecord) => void;
   onDeleteChat: (id: string) => void;
-  onImportLogs: (files: File[]) => void;
-  onImportDirectory: (files: File[]) => void;
-  onImportDirectoryToFolder: (folder: { id: string; label: string }, files: File[]) => void;
+  onDeleteWorkspace: (workspace: { id: string; label: string }) => void;
 }
 
 interface ChatGroup {
@@ -52,8 +43,8 @@ function deriveProjectFromEntries(chat: ChatRecord): { id: string; label: string
   if (!entries.length) return { id: 'project:general', label: 'General' };
 
   const counts = new Map<string, number>();
-  for (const e of entries) {
-    const top = e.path.split('/')[0]?.trim();
+  for (const entry of entries) {
+    const top = entry.path.split('/')[0]?.trim();
     if (!top) continue;
     counts.set(top, (counts.get(top) ?? 0) + 1);
   }
@@ -64,39 +55,37 @@ function deriveProjectFromEntries(chat: ChatRecord): { id: string; label: string
   return { id: normaliseProjectId(label), label };
 }
 
+function formatSidebarAge(updatedAt: number): string {
+  const deltaMinutes = Math.max(1, Math.floor((Date.now() - updatedAt) / 60000));
+  if (deltaMinutes < 60) return `${deltaMinutes}m`;
+
+  const deltaHours = Math.floor(deltaMinutes / 60);
+  if (deltaHours < 24) return `${deltaHours}h`;
+
+  const deltaDays = Math.floor(deltaHours / 24);
+  if (deltaDays < 7) return `${deltaDays}d`;
+
+  return new Date(updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 export function Sidebar({
-  collapsed,
   view,
   folders,
   chats,
   openPanelIds,
   status,
-  statusLabel,
-  onToggleCollapsed,
   onChangeView,
-  onCreateFolder,
+  onOpenWorkspaceLauncher,
   onCreateChatInFolder,
-  onCreateChat,
   onOpenChat,
   onDeleteChat,
-  onImportLogs,
-  onImportDirectory,
-  onImportDirectoryToFolder,
+  onDeleteWorkspace,
 }: Props) {
-  const [query, setQuery] = useState('');
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const importLogsRef = useRef<HTMLInputElement>(null);
-  const importDirRef = useRef<HTMLInputElement>(null);
-  const folderImportRef = useRef<HTMLInputElement>(null);
-  const [folderImportTarget, setFolderImportTarget] = useState<string | null>(null);
-
-  const filtered = query
-    ? chats.filter((c) => (c.title || '').toLowerCase().includes(query.toLowerCase()))
-    : chats;
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
 
   const groups = useMemo<ChatGroup[]>(() => {
     const map = new Map<string, ChatGroup>();
-    for (const chat of filtered) {
+    for (const chat of chats) {
       const project = deriveProjectFromEntries(chat);
       const existing = map.get(project.id);
       if (!existing) {
@@ -128,226 +117,153 @@ export function Sidebar({
       if (b.id === 'project:general') return -1;
       return b.updatedAt - a.updatedAt;
     });
-  }, [filtered, folders]);
+  }, [chats, folders]);
 
   return (
-    <aside className={`app-sidebar${collapsed ? ' collapsed' : ''}`}>
-      <div className="sidebar-top">
-        <button className="sidebar-icon-btn" onClick={onToggleCollapsed} title="Toggle sidebar">
-          <IconMenu size={14} />
-        </button>
-        {!collapsed && (
-          <>
-            <div className={`sidebar-status-dot ${status}`} />
-            <span className="sidebar-status-label">{statusLabel}</span>
-          </>
-        )}
-      </div>
-
-      <div className="sidebar-tabs">
+    <aside className="app-sidebar">
+      <div className="sidebar-header">
         <button
-          className={`sidebar-tab${view === 'chats' ? ' active' : ''}`}
-          onClick={() => onChangeView('chats')}
-          title="Chats"
+          className="sidebar-brand-link"
+          onClick={() => {
+            setActiveWorkspaceId(null);
+            onChangeView('chats');
+          }}
+          title="Workspaces"
         >
-          <IconMessageSquare size={14} />
-          {!collapsed && <span>Chats</span>}
-        </button>
-        <button
-          className={`sidebar-tab${view === 'settings' ? ' active' : ''}`}
-          onClick={() => onChangeView('settings')}
-          title="Settings"
-        >
-          <IconChevronRight size={14} />
-          {!collapsed && <span>Settings</span>}
+          <span className={`sidebar-status-indicator ${status}`} />
+          <span className="sidebar-brand-name">Larry AI</span>
         </button>
       </div>
 
-      {view === 'chats' && (
-        <>
-          <div className="sidebar-actions">
-            <input
-              ref={importLogsRef}
-              type="file"
-              accept=".md,text/markdown"
-              multiple
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const files = Array.from(e.target.files ?? []);
-                e.target.value = '';
-                if (files.length) onImportLogs(files);
-              }}
-            />
-            <input
-              ref={importDirRef}
-              type="file"
-              // @ts-ignore
-              webkitdirectory=""
-              multiple
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const files = Array.from(e.target.files ?? []);
-                e.target.value = '';
-                if (files.length) onImportDirectory(files);
-              }}
-            />
-            <input
-              ref={folderImportRef}
-              type="file"
-              // @ts-ignore
-              webkitdirectory=""
-              multiple
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const files = Array.from(e.target.files ?? []);
-                e.target.value = '';
-                if (files.length && folderImportTarget) {
-                  const target = groups.find(g => g.id === folderImportTarget);
-                  if (target) onImportDirectoryToFolder({ id: target.id, label: target.label }, files);
-                }
-                setFolderImportTarget(null);
-              }}
-            />
+      <button
+        className="sidebar-nav-link primary"
+        onClick={() => {
+          onChangeView('chats');
+          setActiveWorkspaceId(null);
+          onOpenWorkspaceLauncher();
+        }}
+        title="Create workspace"
+      >
+        <span className="sidebar-nav-icon">
+          <IconFolderPlus size={14} />
+        </span>
+        <span>New workspace</span>
+      </button>
 
-            <div className="sidebar-action-row">
-              <button className="sidebar-action-icon primary" onClick={onCreateFolder} title="New folder" data-tip="New Folder">
-                <IconPlus size={13} />
-              </button>
-              <button className="sidebar-action-icon" onClick={() => importLogsRef.current?.click()} title="Import chat logs" data-tip="Import Logs">
-                <IconUpload size={13} />
-              </button>
-              <button className="sidebar-action-icon" onClick={() => importDirRef.current?.click()} title="Import project directory" data-tip="Import Project">
-                <IconFolder size={13} />
-              </button>
-              <button className="sidebar-action-icon" onClick={onCreateChat} title="New chat" data-tip="New Chat">
-                <IconMessageSquare size={13} />
-              </button>
+      <div className="sidebar-section">
+        <div className="sidebar-section-head">
+          <span className="sidebar-section-title">Workspaces</span>
+        </div>
+
+        <div className="sidebar-workspaces">
+          {groups.length === 0 ? (
+            <div className="sidebar-empty">
+              Create a workspace first. Chats only appear after a workspace exists.
             </div>
-          </div>
-
-          {!collapsed && (
-            <>
-              <div className="sidebar-history-head">
-                <span>Conversation History</span>
-              </div>
-              <input
-                className="sidebar-search"
-                placeholder="Search chats..."
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </>
-          )}
-
-          <div className="sidebar-history">
-            {filtered.length === 0 ? (
-              !collapsed && <div className="sidebar-empty">No chats found.</div>
-            ) : collapsed ? (
-              filtered.slice(0, 18).map(chat => (
-                <div key={chat.id} className={`sidebar-history-item${openPanelIds.includes(chat.id) ? ' open' : ''}`}>
-                  <button
-                    className="sidebar-history-open"
-                    onClick={() => onOpenChat(chat)}
-                    title={chat.title || 'Untitled'}
-                  >
-                    <IconMessageSquare size={13} />
-                  </button>
-                </div>
-              ))
-            ) : (
-              groups.map(group => {
-                const isCollapsed = collapsedGroups[group.id] ?? false;
-                return (
-                  <div key={group.id} className="sidebar-group">
-                    <div className="sidebar-group-header">
-                      <button
-                        className="sidebar-group-toggle"
-                        onClick={() => setCollapsedGroups(prev => ({ ...prev, [group.id]: !isCollapsed }))}
-                      >
-                      <span className="sidebar-group-chevron">
-                        {isCollapsed ? <IconChevronRight size={12} /> : <IconChevronDown size={12} />}
+          ) : (
+            groups.map((group) => {
+              const isActive = activeWorkspaceId === group.id;
+              return (
+                <div key={group.id} className="sidebar-workspace">
+                  <div className={`sidebar-workspace-head${isActive ? ' active' : ''}`}>
+                    <button
+                      className={`sidebar-workspace-row${isActive ? ' active' : ''}`}
+                      aria-expanded={isActive}
+                      onClick={() => {
+                        onChangeView('chats');
+                        setActiveWorkspaceId((current) => (current === group.id ? null : group.id));
+                      }}
+                      title={group.label}
+                    >
+                      <span className="sidebar-workspace-row-icon">
+                        {isActive ? <IconFolderOpen size={14} /> : <IconFolder size={14} />}
                       </span>
-                      <span className="sidebar-group-icon">
-                        {isCollapsed ? <IconFolder size={13} /> : <IconFolderOpen size={13} />}
-                      </span>
-                      <span className="sidebar-group-label">{group.label}</span>
-                      <span className="sidebar-group-count">{group.chats.length}</span>
-                      </button>
-                      <div className="sidebar-group-actions">
+                      <span className="sidebar-workspace-row-label">{group.label}</span>
+                    </button>
+
+                    {isActive && (
+                      <div className="sidebar-workspace-inline-tools">
                         <button
-                          className="sidebar-group-action"
-                          title="Select project folder"
-                          onClick={() => {
-                            setFolderImportTarget(group.id);
-                            folderImportRef.current?.click();
-                          }}
-                        >
-                          <IconFolder size={12} />
-                        </button>
-                        <button
-                          className="sidebar-group-action"
-                          title="New chat in folder"
+                          className="sidebar-icon-tool primary"
                           onClick={() => onCreateChatInFolder({ id: group.id, label: group.label })}
+                          title="New chat"
                         >
-                          <IconPlus size={12} />
+                          <IconMessageSquare size={13} />
                         </button>
-                      </div>
-                    </div>
-
-                    {!isCollapsed && (
-                      <div className="sidebar-group-list">
-                        {group.chats.map((chat) => {
-                          const isOpen = openPanelIds.includes(chat.id);
-                          const d = new Date(chat.updatedAt);
-                          const dateStr =
-                            d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-                            ' · ' +
-                            d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-                          return (
-                            <div key={chat.id} className={`sidebar-history-item${isOpen ? ' open' : ''}`}>
-                              <button
-                                className="sidebar-history-open"
-                                onClick={() => onOpenChat(chat)}
-                                title={chat.title || 'Untitled'}
-                              >
-                                <IconMessageSquare size={13} />
-                                <span className="sidebar-history-item-info">
-                                  <span className="sidebar-history-item-title">{chat.title || 'Untitled'}</span>
-                                  <span className="sidebar-history-item-date">{dateStr}</span>
-                                </span>
-                              </button>
-                              <button
-                                className="sidebar-history-delete"
-                                title="Delete chat"
-                                onClick={() => onDeleteChat(chat.id)}
-                              >
-                                <IconTrash2 size={11} />
-                              </button>
-                            </div>
-                          );
-                        })}
+                        <button
+                          className="sidebar-icon-tool danger"
+                          onClick={() => onDeleteWorkspace({ id: group.id, label: group.label })}
+                          title="Delete workspace"
+                        >
+                          <IconTrash2 size={12} />
+                        </button>
                       </div>
                     )}
                   </div>
-                );
-              })
-            )}
-          </div>
 
-          {!collapsed && filtered.length > 0 && (
-            <div className="sidebar-history-footer">
-              <span>{filtered.length} chat{filtered.length !== 1 ? 's' : ''} in {groups.length} project folder{groups.length !== 1 ? 's' : ''}</span>
-            </div>
+                  {isActive && (
+                    <div className="sidebar-workspace-body">
+                      {group.chats.length > 0 ? (
+                        <div className="sidebar-thread-list">
+                          {group.chats.map((chat) => {
+                            const isOpen = openPanelIds.includes(chat.id);
+                            return (
+                              <div
+                                key={chat.id}
+                                className={`sidebar-thread-row${isOpen ? ' open' : ''}`}
+                              >
+                                <button
+                                  className="sidebar-thread-open"
+                                  onClick={() => onOpenChat(chat)}
+                                  title={chat.title || 'Untitled'}
+                                >
+                                  <span className="sidebar-thread-title">
+                                    {chat.title || 'Untitled'}
+                                  </span>
+                                  <span className="sidebar-thread-time">
+                                    {formatSidebarAge(chat.updatedAt)}
+                                  </span>
+                                </button>
+                                <button
+                                  className="sidebar-thread-delete"
+                                  title="Delete chat"
+                                  onClick={() => onDeleteChat(chat.id)}
+                                >
+                                  <IconTrash2 size={11} />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="sidebar-workspace-empty">
+                          No chats yet.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
-        </>
-      )}
-
-      {view === 'settings' && !collapsed && (
-        <div className="sidebar-settings-placeholder">
-          Settings is ready for presets, skills, theme, and model controls.
         </div>
-      )}
+      </div>
+
+      <div className="sidebar-footer">
+        <button
+          className={`sidebar-nav-link${view === 'settings' ? ' active' : ''}`}
+          onClick={() => {
+            setActiveWorkspaceId(null);
+            onChangeView(view === 'settings' ? 'chats' : 'settings');
+          }}
+          title="Settings"
+        >
+          <span className="sidebar-nav-icon">
+            <IconSettings size={14} />
+          </span>
+          <span>Settings</span>
+        </button>
+      </div>
     </aside>
   );
 }

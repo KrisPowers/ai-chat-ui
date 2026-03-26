@@ -1,5 +1,4 @@
 // FILE: src/components/MessageBubble.tsx
-import React from 'react';
 import { parseContent, renderTextBlock, extractFilePath, stripFileComment } from '../lib/markdown';
 import type { CodeBlock as CodeBlockType } from '../lib/markdown';
 import { CodeBlock } from './CodeBlock';
@@ -13,12 +12,25 @@ interface Props {
   message: Message;
   withDownload?: boolean;
   prevRegistry?: FileRegistry;
-  currentRegistry?: FileRegistry;
   model?: string;
   hideCodeBlocks?: boolean;
+  liveReplyLatencyMs?: number;
   /** When true, never show the NoCodeWarning even if the pattern fires.
    *  Used for Chatbot/Creative presets where a code-only response is normal. */
   suppressNoCodeWarning?: boolean;
+}
+
+function formatResponseDuration(ms: number): string {
+  if (ms < 1_000) return `${Math.max(1, Math.round(ms))}ms`;
+
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
 }
 
 function detectFakeCompletion(content: string, fileBlockCount: number): boolean {
@@ -99,12 +111,27 @@ export function MessageBubble({
   message,
   withDownload = false,
   prevRegistry,
-  currentRegistry,
   model,
   hideCodeBlocks = false,
+  liveReplyLatencyMs,
   suppressNoCodeWarning = false,
 }: Props) {
   const isUser = message.role === 'user';
+  const replyLatencyMs = !isUser
+    ? liveReplyLatencyMs ?? message.responseFirstTokenMs ?? message.responseTimeMs
+    : undefined;
+  const replyLatencyLabel = replyLatencyMs != null ? formatResponseDuration(replyLatencyMs) : null;
+  const totalTimingLabel = !isUser && message.responseTimeMs != null
+    ? formatResponseDuration(message.responseTimeMs)
+    : null;
+  const timingTitle = !isUser && replyLatencyLabel
+    ? [
+        `First token ${replyLatencyLabel}`,
+        totalTimingLabel ? `Total ${totalTimingLabel}` : null,
+        message.responseStartedAt ? `Started ${new Date(message.responseStartedAt).toLocaleTimeString()}` : null,
+        message.responseCompletedAt ? `Finished ${new Date(message.responseCompletedAt).toLocaleTimeString()}` : null,
+      ].filter(Boolean).join(' • ')
+    : undefined;
 
   // For code preset messages the full content (with all code blocks) is stored
   // in the message, but we only want to display the summary portion as prose.
@@ -150,42 +177,57 @@ export function MessageBubble({
 
   return (
     <div className={`msg ${message.role}`}>
-      <div className="msg-label">{isUser ? 'You' : 'Larry the Assistant'}</div>
+      <div className="msg-label">
+        {isUser ? (
+          <span>You</span>
+        ) : (
+          <>
+            <strong className="msg-label-name">Larry</strong>
+            {replyLatencyLabel && (
+              <span className="msg-label-response" title={timingTitle}>
+                responded in {replyLatencyLabel}
+              </span>
+            )}
+          </>
+        )}
+      </div>
       <div className="msg-bubble">
-        {parsedDisplay.parts.map((part, i) => {
-          if (part.type === 'text') {
-            return (
-              <span key={i} dangerouslySetInnerHTML={{ __html: renderTextBlock(part.content) }} />
-            );
-          }
+        <div className="msg-bubble-body">
+          {parsedDisplay.parts.map((part, i) => {
+            if (part.type === 'text') {
+              return (
+                <span key={i} dangerouslySetInnerHTML={{ __html: renderTextBlock(part.content) }} />
+              );
+            }
 
-          if (part.block.isInline) {
-            return <InlineCodeBlock key={i} block={part.block} />;
-          }
+            if (part.block.isInline) {
+              return <InlineCodeBlock key={i} block={part.block} />;
+            }
 
-          // Code preset: hide file code blocks entirely — they are silently
-          // parsed into the file registry; only plain text renders in the bubble.
-          if (hideCodeBlocks && !isUser) {
-            return null;
-          }
+            // Code preset: hide file code blocks entirely — they are silently
+            // parsed into the file registry; only plain text renders in the bubble.
+            if (hideCodeBlocks && !isUser) {
+              return null;
+            }
 
-          if (!withDownload || isUser) {
-            return (
-              <div key={i} className="code-block-wrapper">
-                <div className="code-block-header">
-                  <span className="code-lang-badge">{part.block.lang || 'text'}</span>
+            if (!withDownload || isUser) {
+              return (
+                <div key={i} className="code-block-wrapper">
+                  <div className="code-block-header">
+                    <span className="code-lang-badge">{part.block.lang || 'text'}</span>
+                  </div>
+                  <pre className="code-pre">
+                    <code className="block-code">{part.block.code}</code>
+                  </pre>
                 </div>
-                <pre className="code-pre">
-                  <code className="block-code">{part.block.code}</code>
-                </pre>
-              </div>
-            );
-          }
+              );
+            }
 
-          const resolvedPath = extractFilePath(part.block.code, part.block.suggestedFilename);
-          const prevContent = prevRegistry?.get(resolvedPath)?.content;
-          return <CodeBlock key={i} block={part.block} prevContent={prevContent} />;
-        })}
+            const resolvedPath = extractFilePath(part.block.code, part.block.suggestedFilename);
+            const prevContent = prevRegistry?.get(resolvedPath)?.content;
+            return <CodeBlock key={i} block={part.block} prevContent={prevContent} />;
+          })}
+        </div>
       </div>
 
       {isFakeCompletion && <NoCodeWarning model={model ?? ''} />}

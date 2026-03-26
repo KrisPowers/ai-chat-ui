@@ -8,13 +8,13 @@ import { buildDeepPlan, buildStepUserMessage, getStepExecutorSystem, buildSummar
 import type { DeepStep } from '../lib/deepPlanner';
 import { registryToSystemPrompt, updateRegistry } from '../lib/fileRegistry';
 import { extractCodeBlocksForRegistry } from '../lib/markdown';
-import { fetchUrlsFromPrompt, fetchGlobalContext, urlContextToSystemInject, globalContextToSystemInject, globalContextToConversationInject, contextsToSystemInject } from '../lib/fetcher';
-import type { FetchedContext } from '../lib/fetcher';
+import { extractUrlsFromText, fetchUrlsFromPrompt, fetchGlobalContext, shouldFetchGlobalContext, urlContextToSystemInject, globalContextToSystemInject, globalContextToConversationInject } from '../lib/fetcher';
 import { PRESETS, getPreset, DEFAULT_PRESET_ID } from '../lib/presets';
 import {
   IconSend, IconStop, IconRotateCcw, IconX,
   IconHexagon,
   IconDownload,
+  IconUpload,
 } from './Icon';
 import type { Panel, Message } from '../types';
 import type { FileRegistry } from '../lib/fileRegistry';
@@ -27,12 +27,13 @@ interface Props {
   onSave: (panel: Panel) => void;
   selected?: boolean;
   onActivate?: (id: string) => void;
+  onImportWorkspaceFiles?: (files: File[]) => void;
 }
 
 function exportChatAsMarkdown(panel: Panel): string {
   const date = new Date().toISOString().replace('T', ' ').slice(0, 19);
   const lines: string[] = [
-    `# Chat Log — ${panel.title}`, ``,
+    `# Chat Log - ${panel.title}`, ``,
     `**Model:** ${panel.model || 'unknown'}  `,
     `**Preset:** ${panel.preset || 'code'}  `,
     ...(panel.projectLabel ? [`**Project:** ${panel.projectLabel}  `] : []),
@@ -45,11 +46,29 @@ function exportChatAsMarkdown(panel: Panel): string {
   return lines.join('\n');
 }
 
-export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, onActivate }: Props) {
+export function ChatPanel({
+  panel,
+  models,
+  onUpdate,
+  onClose,
+  onSave,
+  selected,
+  onActivate,
+  onImportWorkspaceFiles,
+}: Props) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
+  const importDirectoryRef = useRef<HTMLInputElement>(null);
   const abortRef       = useRef<AbortController | null>(null);
+  const responseTimingRef = useRef<{
+    startedAt: number;
+    startedPerf: number;
+    firstTokenAt?: number;
+    firstTokenPerf?: number;
+  } | null>(null);
   const [inputValue, setInputValue] = useState('');
+  const [liveResponseMs, setLiveResponseMs] = useState<number | null>(null);
+  const [liveReplyLatencyMs, setLiveReplyLatencyMs] = useState<number | null>(null);
 
   const [checklistSteps,       setChecklistSteps]       = useState<DeepStep[]>([]);
   const [checklistCurrentStep, setChecklistCurrentStep] = useState(0);
@@ -69,7 +88,22 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
       setChecklistPlanning(false);
       setChecklistClassifying(false);
       setChecklistMode(undefined);
+      setLiveResponseMs(null);
+      setLiveReplyLatencyMs(null);
     }
+  }, [panel.streaming]);
+
+  useEffect(() => {
+    if (!panel.streaming || !responseTimingRef.current) return undefined;
+
+    const tick = () => {
+      if (!responseTimingRef.current) return;
+      setLiveResponseMs(Math.max(0, performance.now() - responseTimingRef.current.startedPerf));
+    };
+
+    tick();
+    const interval = window.setInterval(tick, 100);
+    return () => window.clearInterval(interval);
   }, [panel.streaming]);
 
   function handleExportLog() {
@@ -81,7 +115,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
     URL.revokeObjectURL(a.href);
   }
 
-  // ── Send ────────────────────────────────────────────────────────────────────
+  // Send
   const handleSend = useCallback(async () => {
     const text = inputValue.trim();
     if (!text || panel.streaming) return;
@@ -93,19 +127,28 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
     const presetId                       = panel.preset ?? DEFAULT_PRESET_ID;
     const isCodePreset                   = presetId === 'code';
     const modelName                      = panel.model || models[0] || 'llama3';
+    const hasPromptUrls                  = extractUrlsFromText(text).length > 0;
+    const fetchLiveContext               = !isCodePreset && shouldFetchGlobalContext(text, panel.messages);
+    responseTimingRef.current = { startedAt: Date.now(), startedPerf: performance.now() };
+    setLiveResponseMs(0);
+    setLiveReplyLatencyMs(null);
 
     onUpdate(panel.id, {
       messages: updatedMessages,
       streaming: true,
       streamingContent: '',
       prevRegistry: snapshotRegistry,
-      streamingPhase: { label: 'Fetching context…', stepIndex: 0, totalSteps: 0 },
+      streamingPhase: {
+        label: hasPromptUrls || fetchLiveContext ? 'Fetching context...' : 'Starting reply...',
+        stepIndex: 0,
+        totalSteps: 0,
+      },
     });
 
     const abort = new AbortController();
     abortRef.current = abort;
 
-    // ── Auto-fetch: URLs in the prompt + global knowledge sources ───────────
+    // Auto-fetch: URLs in the prompt + global knowledge sources
     // Pass the full conversation history so follow-up questions ("what is the
     // US involvement?") can inherit topics from prior messages ("Iran").
     // Global context is injected BOTH into the system prompt AND as a synthetic
@@ -113,18 +156,18 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
     // deprioritise system prompts will see and use the live data.
     let urlInject    = '';
     let globalInject = '';
-    let contextTurns: Array<{ role: string; content: string }> = [];
+    let contextTurns: Message[] = [];
     try {
       const [promptContexts, globalContexts] = await Promise.all([
         fetchUrlsFromPrompt(text),
-        isCodePreset ? Promise.resolve([]) : fetchGlobalContext(text, panel.messages),
+        fetchLiveContext ? fetchGlobalContext(text, panel.messages) : Promise.resolve([]),
       ]);
       urlInject    = urlContextToSystemInject(promptContexts);
       globalInject = globalContextToSystemInject(globalContexts);
       contextTurns = globalContextToConversationInject(globalContexts, text);
     } catch { /* network failure is non-fatal */ }
 
-    // ── Non-code presets — single pass ──────────────────────────────────────
+    // Non-code presets - single pass
     if (!isCodePreset) {
       const preset = getPreset(presetId);
       const systemPrompt = preset.systemPrompt
@@ -147,6 +190,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
       try {
         const gen = streamChat(modelName, messagesWithContext, systemPrompt, abort.signal);
         for await (const chunk of gen) {
+          markFirstToken();
           accumulated += chunk;
           onUpdate(panel.id, { streamingContent: accumulated, streamingPhase: null });
         }
@@ -157,13 +201,13 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
       return;
     }
 
-    // ── Code preset: plan → execute each step independently ─────────────────
+    // Code preset: plan -> execute each step independently
     try {
       setChecklistClassifying(true);
       setChecklistPlanning(false);
       setChecklistSteps([]);
       setChecklistCurrentStep(0);
-      onUpdate(panel.id, { streamingPhase: { label: 'Analysing request…', stepIndex: 0, totalSteps: 0 } });
+      onUpdate(panel.id, { streamingPhase: { label: 'Analysing request...', stepIndex: 0, totalSteps: 0 } });
 
       const plan = await buildDeepPlan(text, panel.messages, modelName, abort.signal);
 
@@ -189,7 +233,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
 
         onUpdate(panel.id, {
           streamingPhase: {
-            label:      `Step ${si + 1} of ${plan.steps.length} — ${step.filePath}`,
+            label:      `Step ${si + 1} of ${plan.steps.length} - ${step.filePath}`,
             stepIndex:  si + 1,
             totalSteps: plan.steps.length,
           },
@@ -205,6 +249,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
         let stepContent = '';
         const gen = streamChat(modelName, stepMessages, executorSystem, abort.signal);
         for await (const token of gen) {
+          markFirstToken();
           stepContent += token;
           onUpdate(panel.id, { streamingContent: combinedContent + stepContent });
         }
@@ -228,7 +273,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
 
       onUpdate(panel.id, {
         streamingPhase: {
-          label: 'Writing summary…',
+          label: 'Writing summary...',
           stepIndex: plan.steps.length + 1,
           totalSteps: plan.steps.length + 1,
         },
@@ -243,6 +288,7 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
       let summaryContent = '';
       const summaryGen = streamChat(modelName, summaryMessages, getSummarySystem(), abort.signal);
       for await (const token of summaryGen) {
+        markFirstToken();
         summaryContent += token;
         onUpdate(panel.id, { streamingContent: combinedContent + '\n\n<!-- summary -->\n\n' + summaryContent });
       }
@@ -260,10 +306,29 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
       snapReg: FileRegistry,
       baseReg: FileRegistry,
     ) {
-      const assistantMsg: Message = { role: 'assistant', content };
+      const timing = responseTimingRef.current;
+      const completedAt = Date.now();
+      const responseFirstTokenMs = timing
+        ? Math.max(0, Math.round((timing.firstTokenPerf ?? performance.now()) - timing.startedPerf))
+        : undefined;
+      const responseTimeMs = timing
+        ? Math.max(0, Math.round(performance.now() - timing.startedPerf))
+        : undefined;
+      const assistantMsg: Message = {
+        role: 'assistant',
+        content,
+        responseTimeMs,
+        responseFirstTokenMs,
+        responseStartedAt: timing?.startedAt,
+        responseFirstTokenAt: timing?.firstTokenAt ?? completedAt,
+        responseCompletedAt: timing ? completedAt : undefined,
+      };
       const finalMessages         = [...msgs, assistantMsg];
       const newBlocks             = extractCodeBlocksForRegistry(content);
       const updatedReg            = updateRegistry(baseReg, newBlocks, finalMessages.length - 1);
+      responseTimingRef.current = null;
+      setLiveResponseMs(null);
+      setLiveReplyLatencyMs(null);
 
       onUpdate(panel.id, {
         messages: finalMessages,
@@ -283,25 +348,69 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
     }
 
     function handleError(err: unknown, msgs: Message[]) {
+      const timing = responseTimingRef.current;
+      const completedAt = Date.now();
+      const responseFirstTokenMs = timing
+        ? Math.max(0, Math.round((timing.firstTokenPerf ?? performance.now()) - timing.startedPerf))
+        : undefined;
+      const responseTimeMs = timing
+        ? Math.max(0, Math.round(performance.now() - timing.startedPerf))
+        : undefined;
       if ((err as Error)?.name === 'AbortError') {
         const content = panel.streamingContent;
         if (content) {
-          const assistantMsg: Message = { role: 'assistant', content: content + '\n\n_[stopped]_' };
+          const assistantMsg: Message = {
+            role: 'assistant',
+            content: content + '\n\n_[stopped]_',
+            responseTimeMs,
+            responseFirstTokenMs,
+            responseStartedAt: timing?.startedAt,
+            responseFirstTokenAt: timing?.firstTokenAt ?? completedAt,
+            responseCompletedAt: timing ? completedAt : undefined,
+          };
           const finalMessages         = [...msgs, assistantMsg];
           const newBlocks             = extractCodeBlocksForRegistry(content);
           const updatedReg            = updateRegistry(panel.fileRegistry, newBlocks, finalMessages.length - 1);
+          responseTimingRef.current = null;
+          setLiveResponseMs(null);
+          setLiveReplyLatencyMs(null);
           onUpdate(panel.id, { messages: finalMessages, streaming: false, streamingContent: '', fileRegistry: updatedReg, streamingPhase: null });
           onSave({ ...panel, messages: finalMessages, fileRegistry: updatedReg, streamingPhase: null });
         } else {
+          responseTimingRef.current = null;
+          setLiveResponseMs(null);
+          setLiveReplyLatencyMs(null);
           onUpdate(panel.id, { streaming: false, streamingContent: '', streamingPhase: null });
         }
       } else {
         const errMsg: Message = {
           role: 'assistant',
           content: `Error: ${(err as Error).message}\n\nMake sure Ollama is running:\n\`\`\`bash\nOLLAMA_ORIGINS=* ollama serve\n\`\`\``,
+          responseTimeMs,
+          responseFirstTokenMs,
+          responseStartedAt: timing?.startedAt,
+          responseFirstTokenAt: timing?.firstTokenAt ?? completedAt,
+          responseCompletedAt: timing ? completedAt : undefined,
         };
+        responseTimingRef.current = null;
+        setLiveResponseMs(null);
+        setLiveReplyLatencyMs(null);
         onUpdate(panel.id, { messages: [...msgs, errMsg], streaming: false, streamingContent: '', streamingPhase: null });
       }
+    }
+
+    function markFirstToken() {
+      const timing = responseTimingRef.current;
+      if (!timing || timing.firstTokenPerf != null) return;
+
+      const firstTokenAt = Date.now();
+      const firstTokenPerf = performance.now();
+      responseTimingRef.current = {
+        ...timing,
+        firstTokenAt,
+        firstTokenPerf,
+      };
+      setLiveReplyLatencyMs(Math.max(0, Math.round(firstTokenPerf - timing.startedPerf)));
     }
 
   }, [inputValue, panel, models, onUpdate, onSave]);
@@ -331,9 +440,26 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
   const currentPreset  = panel.preset ?? DEFAULT_PRESET_ID;
   const isCodeStreaming = panel.streaming && currentPreset === 'code';
   const hasMessages     = panel.messages.length > 0;
+  const canImportWorkspaceFiles = Boolean(panel.projectId && panel.projectLabel && onImportWorkspaceFiles);
+  const inputPlaceholder =
+    "Ask anything... paste a URL and it'll be fetched automatically. Shift+Enter for newline.";
 
   return (
     <div className={`chat-panel${selected ? ' active' : ''}`} onMouseDown={() => onActivate?.(panel.id)}>
+      <input
+        ref={importDirectoryRef}
+        type="file"
+        // @ts-ignore
+        webkitdirectory=""
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = '';
+          if (files.length) onImportWorkspaceFiles?.(files);
+        }}
+      />
+
       <div className="panel-header">
         <input
           className="panel-title"
@@ -395,7 +521,6 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
                   message={msg}
                   withDownload={true}
                   prevRegistry={panel.prevRegistry}
-                  currentRegistry={panel.fileRegistry}
                   model={panel.model}
                   hideCodeBlocks={isCodeAssistant}
                   suppressNoCodeWarning={currentPreset !== 'code'}
@@ -429,9 +554,9 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
                           message={{ role: 'assistant', content: panel.streamingContent }}
                           withDownload={false}
                           prevRegistry={panel.prevRegistry}
-                          currentRegistry={panel.fileRegistry}
                           model={panel.model}
                           hideCodeBlocks={isCodeStreaming}
+                          liveReplyLatencyMs={liveReplyLatencyMs ?? undefined}
                           suppressNoCodeWarning={true}
                         />
                       );
@@ -440,7 +565,10 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
                 ) : !isCodeStreaming ? (
                   <div className="thinking">
                     <div className="thinking-dots"><span /><span /><span /></div>
-                    <span>thinking...</span>
+                    <span>
+                      thinking...
+                      {liveResponseMs != null ? ` ${Math.max(0.1, liveResponseMs / 1000).toFixed(1)}s` : ''}
+                    </span>
                   </div>
                 ) : null}
               </>
@@ -454,16 +582,36 @@ export function ChatPanel({ panel, models, onUpdate, onClose, onSave, selected, 
 
       <div className="panel-input">
         <div className="input-row">
-          <textarea
-            ref={inputRef}
-            className="msg-input"
-            rows={1}
-            placeholder="Ask anything… paste a URL and it'll be fetched automatically. Shift+Enter for newline."
-            value={inputValue}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-            disabled={panel.streaming}
-          />
+          <div className="input-actions">
+            <button
+              className="input-action-btn"
+              type="button"
+              disabled={!canImportWorkspaceFiles || panel.streaming}
+              title={
+                canImportWorkspaceFiles
+                  ? 'Upload project folder to this workspace'
+                  : 'Open a workspace chat to upload project files'
+              }
+              onClick={() => importDirectoryRef.current?.click()}
+            >
+              <IconUpload size={14} />
+            </button>
+          </div>
+          <div className="msg-input-shell">
+            {!inputValue && (
+              <span className="msg-input-placeholder">{inputPlaceholder}</span>
+            )}
+            <textarea
+              ref={inputRef}
+              className="msg-input"
+              rows={1}
+              aria-label={inputPlaceholder}
+              value={inputValue}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              disabled={panel.streaming}
+            />
+          </div>
           {panel.streaming ? (
             <button className="send-btn stop" onClick={handleStop} title="Stop generation">
               <IconStop size={14} />

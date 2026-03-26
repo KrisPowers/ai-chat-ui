@@ -16,7 +16,7 @@ interface Props {
  * Parse an exported Markdown chat log back into a ChatRecord.
  * Expected format (as produced by exportChatAsMarkdown in ChatPanel):
  *
- *   # Chat Log — <title>
+ *   # Chat Log - <title>
  *   **Model:** <model>
  *   **Preset:** <preset>
  *   **Exported:** <date>
@@ -31,7 +31,7 @@ interface Props {
 function parseChatLog(md: string, filename: string): ChatRecord | null {
   try {
     const lines = md.split('\n');
-    const title = lines[0]?.replace(/^#\s*Chat Log\s*[—–-]\s*/, '').trim() || filename.replace(/\.md$/, '');
+    const title = lines[0]?.replace(/^#\s*Chat Log\s*[\u2014\u2013-]\s*/, '').trim() || filename.replace(/\.md$/, '');
 
     const modelLine  = lines.find(l => l.startsWith('**Model:**'));
     const presetLine = lines.find(l => l.startsWith('**Preset:**'));
@@ -149,7 +149,7 @@ export function HistoryModal({ chats, openPanelIds, onOpen, onDelete, onClearAll
               const d = new Date(chat.updatedAt);
               const dateStr =
                 d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-                ' · ' +
+                ' / ' +
                 d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
               return (
@@ -164,7 +164,7 @@ export function HistoryModal({ chats, openPanelIds, onOpen, onDelete, onClearAll
                   <div className="history-item-info">
                     <div className="history-item-name">{chat.title || 'Untitled'}</div>
                     <div className="history-item-date">
-                      {dateStr} · {chat.messages?.length ?? 0} msgs
+                      {dateStr} / {chat.messages?.length ?? 0} msgs
                     </div>
                   </div>
                   {isOpen && (

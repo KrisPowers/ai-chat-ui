@@ -1,9 +1,14 @@
 // FILE: src/types/index.ts
-import type { FileRegistry } from '../lib/fileRegistry';
+import type { FileEntry, FileRegistry } from '../lib/fileRegistry';
 
 export interface Message {
   role: 'user' | 'assistant';
   content: string;
+  responseTimeMs?: number;
+  responseFirstTokenMs?: number;
+  responseStartedAt?: number;
+  responseFirstTokenAt?: number;
+  responseCompletedAt?: number;
 }
 
 export interface ChatRecord {
@@ -15,13 +20,14 @@ export interface ChatRecord {
   projectLabel?: string;
   messages: Message[];
   updatedAt: number;
-  fileEntries?: Array<{ path: string; content: string; lang: string; updatedAt: number }>;
+  fileEntries?: FileEntry[];
 }
 
 export interface ProjectFolder {
   id: string;
   label: string;
   createdAt: number;
+  fileEntries?: FileEntry[];
 }
 
 /**
