@@ -1,24 +1,23 @@
 // FILE: src/components/ChatPanel.tsx
-import React, { useRef, useEffect, useState, useCallback, KeyboardEvent } from 'react';
+import { useRef, useEffect, useState, useCallback, KeyboardEvent } from 'react';
+import { ChatComposer, type ChatComposerOption } from './ChatComposer';
 import { MessageBubble } from './MessageBubble';
 import { FileRegistryPanel } from './FileRegistryPanel';
 import { ChecklistIndicator } from './ChecklistIndicator';
-import { getModelDisplayName, getModelProviderLabel, resolveModelHandle, streamChat } from '../lib/ollama';
+import { resolveModelHandle, streamChat } from '../lib/ollama';
 import { classifyRequest, resolvePackageVersions, planRequest, buildStepUserMessage, getStepExecutorSystem, buildSummaryUserMessage, getSummarySystem, packageVersionsToSystemInject } from '../lib/deepPlanner';
 import type { DeepStep, PackageVersion } from '../lib/deepPlanner';
 import { registryToSystemPrompt, updateRegistry } from '../lib/fileRegistry';
 import { extractCodeBlocksForRegistry } from '../lib/markdown';
+import { readImportableAttachments } from '../lib/chatAttachments';
 import { extractUrlsFromText, fetchUrlsFromPrompt, fetchGlobalContext, getRequiredLiveSourceCount, shouldFetchGlobalContext, urlContextToSystemInject, globalContextToSystemInject, globalContextToConversationInject, extractCrewRosterFromContexts } from '../lib/fetcher';
 import type { ExtractedCrewRosterMember, FetchContextDepth, FetchedContext } from '../lib/fetcher';
-import { PRESETS, getPreset, DEFAULT_PRESET_ID } from '../lib/presets';
+import { PRESETS, getPreset, DEFAULT_PRESET_ID, describePreset } from '../lib/presets';
 import { classifyChatWorkflow } from '../lib/chatMode';
 import { useReplyPreferences } from '../hooks/useReplyPreferences';
 import { buildReplyPreferenceId, buildReplyPreferenceInject, cleanReplyPreferenceText } from '../lib/replyPreferences';
 import {
-  IconCheck,
-  IconChevronDown,
-  IconPaperclip,
-  IconStop, IconRotateCcw, IconX,
+  IconX,
   IconHexagon,
   IconDownload,
 } from './Icon';
@@ -250,7 +249,7 @@ const CREW_ROLE_PRIORITY: Record<string, number> = {
 };
 const DEFAULT_REASONING_EFFORT: ChatReasoningEffort = 'balanced';
 const REASONING_EFFORT_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
-  { value: 'light', label: 'Light' },
+  { value: 'light', label: 'Low' },
   { value: 'balanced', label: 'Balanced' },
   { value: 'high', label: 'High' },
   { value: 'extra-high', label: 'Extra High' },
@@ -265,7 +264,7 @@ const REASONING_EFFORT_CONFIG: Record<ChatReasoningEffort, {
   comparisonGuidance: string;
 }> = {
   light: {
-    label: 'Light',
+    label: 'Low',
     fetchDepth: 'standard',
     maxSources: 6,
     minLiveSources: 3,
@@ -755,7 +754,7 @@ function appendTraceSources(
       kind,
       title: context.title || context.url,
       url: context.url,
-      status: context.error ? 'error' : 'fetched',
+      status: context.error ? 'error' as const : 'fetched' as const,
       durationMs: context.durationMs,
       preview: context.text ? truncateTracePreview(context.text) : undefined,
       error: context.error,
@@ -786,21 +785,18 @@ export function ChatPanel({
   panel,
   models,
   showDeveloperTools = false,
-  showAdvancedUse = false,
   onUpdate,
   onClose,
   onSave,
   selected,
   backgroundMode,
   onActivate,
-  onImportWorkspaceFiles,
   launchPrompt,
   onConsumeLaunchPrompt,
 }: Props) {
   const { replyPreferences, saveReplyPreference, removeReplyPreference } = useReplyPreferences();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
-  const importDirectoryRef = useRef<HTMLInputElement>(null);
   const abortRef       = useRef<AbortController | null>(null);
   const latestTitleRef = useRef(panel.title);
   const autoTitleRef = useRef<string | null>(null);
@@ -814,16 +810,12 @@ export function ChatPanel({
   const [inputValue, setInputValue] = useState('');
   const [liveResponseMs, setLiveResponseMs] = useState<number | null>(null);
   const [liveReplyLatencyMs, setLiveReplyLatencyMs] = useState<number | null>(null);
-  const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [reasoningPickerOpen, setReasoningPickerOpen] = useState(false);
 
   const [checklistSteps,       setChecklistSteps]       = useState<DeepStep[]>([]);
   const [checklistCurrentStep, setChecklistCurrentStep] = useState(0);
   const [checklistPlanning,    setChecklistPlanning]     = useState(false);
   const [checklistClassifying, setChecklistClassifying] = useState(false);
   const [checklistMode,        setChecklistMode]        = useState<import('../lib/deepPlanner').RequestMode | undefined>();
-  const modelPickerRef = useRef<HTMLDivElement>(null);
-  const reasoningPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -864,33 +856,6 @@ export function ChatPanel({
     const interval = window.setInterval(tick, 100);
     return () => window.clearInterval(interval);
   }, [panel.streaming]);
-
-  useEffect(() => {
-    if (!modelPickerOpen && !reasoningPickerOpen) return undefined;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!modelPickerRef.current?.contains(event.target as Node)) {
-        setModelPickerOpen(false);
-      }
-      if (!reasoningPickerRef.current?.contains(event.target as Node)) {
-        setReasoningPickerOpen(false);
-      }
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setModelPickerOpen(false);
-        setReasoningPickerOpen(false);
-      }
-    };
-
-    window.addEventListener('mousedown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('mousedown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [modelPickerOpen, reasoningPickerOpen]);
 
   const replyPreferenceFeedbackById = new Map(
     replyPreferences.map((entry) => [entry.id, entry.feedback]),
@@ -1806,10 +1771,6 @@ export function ChatPanel({
   ]);
 
   function handleStop()  { abortRef.current?.abort(); }
-  function handleClear() {
-    onUpdate(panel.id, { messages: [], fileRegistry: new Map(), prevRegistry: new Map(), streamingPhase: null });
-    onSave({ ...panel, messages: [], fileRegistry: new Map(), prevRegistry: new Map(), streamingPhase: null });
-  }
   function handleModelChange(model: string) {
     onUpdate(panel.id, { model });
     onSave({ ...panel, model });
@@ -1824,25 +1785,42 @@ export function ChatPanel({
   }
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
-    const el = e.currentTarget;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }
-  function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
-    setInputValue(e.target.value);
-    const el = e.target;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+
+  async function handleUploadFiles(files: File[]) {
+    const imported = await readImportableAttachments(files);
+    if (!imported.length) return;
+    const updatedRegistry = updateRegistry(panel.fileRegistry, imported, panel.messages.length);
+    onUpdate(panel.id, { fileRegistry: updatedRegistry });
+    onSave({ ...panel, fileRegistry: updatedRegistry });
   }
 
   const currentPreset  = panel.preset ?? DEFAULT_PRESET_ID;
   const currentReasoningEffort = panel.reasoningEffort ?? DEFAULT_REASONING_EFFORT;
-  const currentReasoningConfig = REASONING_EFFORT_CONFIG[currentReasoningEffort];
   const currentModel = resolveModelHandle(panel.model, models, { preserveUnavailable: true });
+  const isCodeThread = panel.threadType === 'code' || panel.threadType === 'debug';
+  const presetCandidates = isCodeThread
+    ? PRESETS.filter((preset) => preset.id === 'code')
+    : PRESETS.filter((preset) => preset.id !== 'code');
+  const presetPickerOptions = (
+    presetCandidates.some((preset) => preset.id === currentPreset)
+      ? presetCandidates
+      : [getPreset(currentPreset), ...presetCandidates.filter((preset) => preset.id !== currentPreset)]
+  ).map<ChatComposerOption>((preset) => ({
+    value: preset.id,
+    label: preset.label,
+    description: describePreset(preset.id),
+  }));
+  const reasoningOptions = REASONING_EFFORT_OPTIONS.map<ChatComposerOption>((option) => {
+    const optionConfig = REASONING_EFFORT_CONFIG[option.value];
+    return {
+      value: option.value,
+      label: option.label,
+      description: `${optionConfig.minLiveSources} live source${optionConfig.minLiveSources === 1 ? '' : 's'} minimum with a ${optionConfig.fetchDepth === 'deep' ? 'deep' : 'standard'} comparison pass.`,
+    };
+  });
   const isCodeStreaming = panel.streaming && currentPreset === 'code';
-  const showReasoningControl = currentPreset !== 'code';
   const hasMessages     = panel.messages.length > 0;
-  const canImportWorkspaceFiles = Boolean(panel.projectId && panel.projectLabel && onImportWorkspaceFiles);
   const inputPlaceholder =
     "Ask anything... paste a URL and it'll be fetched automatically. Shift+Enter for newline.";
 
@@ -1851,20 +1829,6 @@ export function ChatPanel({
       className={`chat-panel${selected ? ' active' : ''}${backgroundMode ? ' background-mode' : ''}`}
       onMouseDown={() => onActivate?.(panel.id)}
     >
-      <input
-        ref={importDirectoryRef}
-        type="file"
-        // @ts-ignore
-        webkitdirectory=""
-        multiple
-        style={{ display: 'none' }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? []);
-          e.target.value = '';
-          if (files.length) onImportWorkspaceFiles?.(files);
-        }}
-      />
-
       <div className="panel-header">
         <input
           className="panel-title"
@@ -1983,198 +1947,33 @@ export function ChatPanel({
       <FileRegistryPanel registry={panel.fileRegistry} chatTitle={panel.title} />
 
       <div className="panel-input">
-        <div className="input-row">
-          <div className="msg-input-shell">
-            {!inputValue && (
-              <span className="msg-input-placeholder">{inputPlaceholder}</span>
-            )}
-            <textarea
-              ref={inputRef}
-              className="msg-input"
-              rows={1}
-              aria-label={inputPlaceholder}
-              value={inputValue}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              disabled={panel.streaming}
-            />
-          </div>
-        </div>
-        <div className="composer-toolbar">
-          <div className="composer-toolbar-left">
-            <button
-              className="input-action-btn composer-attach-btn"
-              type="button"
-              disabled={!canImportWorkspaceFiles || panel.streaming}
-              title={
-                canImportWorkspaceFiles
-                  ? 'Upload project folder to this workspace'
-                  : 'Open a workspace chat to upload project files'
-              }
-              onClick={() => importDirectoryRef.current?.click()}
-            >
-              <IconPaperclip size={15} />
-            </button>
-
-            {showAdvancedUse && (
-              <div className={`model-picker composer-picker composer-picker-upward${modelPickerOpen ? ' open' : ''}`} ref={modelPickerRef}>
-                <button
-                  type="button"
-                  className="model-picker-trigger composer-picker-trigger"
-                  onClick={() => {
-                    setReasoningPickerOpen(false);
-                    setModelPickerOpen((current) => !current);
-                  }}
-                  aria-haspopup="listbox"
-                  aria-expanded={modelPickerOpen}
-                  disabled={panel.streaming}
-                >
-                  <span className="model-picker-trigger-copy">
-                    <span className="model-picker-trigger-label">Model</span>
-                    <strong>{getModelDisplayName(currentModel)}</strong>
-                  </span>
-                  <span className="model-picker-trigger-icon">
-                    <IconChevronDown size={16} />
-                  </span>
-                </button>
-
-                {modelPickerOpen && (
-                  <div className="model-picker-popover composer-picker-popover composer-picker-popover-upward" role="listbox" aria-label="Chat models">
-                    <div className="model-picker-popover-head">
-                      <span className="model-picker-popover-kicker">Model</span>
-                      <strong>Select the active model for this chat</strong>
-                    </div>
-
-                    <div className="model-picker-option-list">
-                      {(models.length ? models : ['']).map((model) => {
-                        const isSelected = currentModel === model;
-                        return (
-                          <button
-                            key={model || 'none'}
-                            type="button"
-                            className={`model-picker-option${isSelected ? ' active' : ''}`}
-                            onClick={() => {
-                              handleModelChange(model);
-                              setModelPickerOpen(false);
-                            }}
-                          >
-                            <span className="model-picker-option-copy">
-                              <strong>{model ? getModelDisplayName(model) : 'No models detected'}</strong>
-                              <span>{model ? `Use ${getModelProviderLabel(model)} for the current conversation.` : 'No hosted models are available right now.'}</span>
-                            </span>
-                            <span className="model-picker-option-mark">
-                              {isSelected ? <IconCheck size={16} /> : null}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {showReasoningControl && (
-              <div className={`model-picker composer-picker composer-picker-upward${reasoningPickerOpen ? ' open' : ''}`} ref={reasoningPickerRef}>
-                <button
-                  type="button"
-                  className="model-picker-trigger composer-picker-trigger"
-                  onClick={() => {
-                    setModelPickerOpen(false);
-                    setReasoningPickerOpen((current) => !current);
-                  }}
-                  aria-haspopup="listbox"
-                  aria-expanded={reasoningPickerOpen}
-                  disabled={panel.streaming}
-                >
-                  <span className="model-picker-trigger-copy">
-                    <span className="model-picker-trigger-label">Reasoning Effort</span>
-                    <strong>{currentReasoningConfig.label}</strong>
-                  </span>
-                  <span className="model-picker-trigger-icon">
-                    <IconChevronDown size={16} />
-                  </span>
-                </button>
-
-                {reasoningPickerOpen && (
-                  <div className="model-picker-popover composer-picker-popover composer-picker-popover-upward" role="listbox" aria-label="Reasoning effort">
-                    <div className="model-picker-popover-head">
-                      <span className="model-picker-popover-kicker">Reasoning Effort</span>
-                      <strong>Control evidence depth and reply detail</strong>
-                    </div>
-
-                    <div className="model-picker-option-list">
-                      {REASONING_EFFORT_OPTIONS.map((option) => {
-                        const optionConfig = REASONING_EFFORT_CONFIG[option.value];
-                        const isSelected = option.value === currentReasoningEffort;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            className={`model-picker-option${isSelected ? ' active' : ''}`}
-                            onClick={() => {
-                              handleReasoningEffortChange(option.value);
-                              setReasoningPickerOpen(false);
-                            }}
-                          >
-                            <span className="model-picker-option-copy">
-                              <strong>{option.label}</strong>
-                              <span>
-                                {optionConfig.minLiveSources} live source{optionConfig.minLiveSources === 1 ? '' : 's'} minimum, {optionConfig.fetchDepth === 'deep' ? 'deep' : 'standard'} comparison pass.
-                              </span>
-                            </span>
-                            <span className="model-picker-option-mark">
-                              {isSelected ? <IconCheck size={16} /> : null}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          {panel.streaming ? (
-            <button
-              className="launch-action-btn composer-send-action composer-stop-action"
-              onClick={handleStop}
-              title="Stop generation"
-            >
-              <span className="chat-send-action-icon-shell">
-                <span className="chat-send-action-icon-float">
-                  <IconStop size={16} />
-                </span>
-              </span>
-              <span className="chat-send-action-label">Stop</span>
-            </button>
-          ) : (
-            <button
-              className="launch-action-btn primary chat-send-action composer-send-action"
-              onClick={handleSend}
-              disabled={!inputValue.trim()}
-            >
-              <span className="chat-send-action-icon-shell">
-                <span className="chat-send-action-icon-float">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    width="18"
-                    height="18"
-                    aria-hidden="true"
-                  >
-                    <path fill="none" d="M0 0h24v24H0z" />
-                    <path
-                      fill="currentColor"
-                      d="M1.946 9.315c-.522-.174-.527-.455.01-.634l19.087-6.362c.529-.176.832.12.684.638l-5.454 19.086c-.15.529-.455.547-.679.045L12 14l6-8-8 6-8.054-2.685z"
-                    />
-                  </svg>
-                </span>
-              </span>
-              <span className="chat-send-action-label">Send</span>
-            </button>
-          )}
-        </div>
+        <ChatComposer
+          value={inputValue}
+          onValueChange={setInputValue}
+          onKeyDown={handleKeyDown}
+          placeholder={inputPlaceholder}
+          ariaLabel={inputPlaceholder}
+          textareaRef={inputRef}
+          disabled={panel.streaming}
+          uploadTitle="Upload files or a zip into this chat"
+          uploadActive={panel.fileRegistry.size > 0}
+          onUploadFiles={handleUploadFiles}
+          reasoningValue={currentReasoningEffort}
+          reasoningOptions={reasoningOptions}
+          onReasoningChange={(value) => handleReasoningEffortChange(value as ChatReasoningEffort)}
+          reasoningDisabled={currentPreset === 'code'}
+          presetValue={currentPreset}
+          presetOptions={presetPickerOptions}
+          onPresetChange={handlePresetChange}
+          presetDisabled={presetPickerOptions.length < 2}
+          modelValue={currentModel}
+          modelOptions={models}
+          onModelChange={handleModelChange}
+          onSend={handleSend}
+          sendDisabled={!inputValue.trim()}
+          isStreaming={panel.streaming}
+          onStop={handleStop}
+        />
       </div>
     </div>
   );

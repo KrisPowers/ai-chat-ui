@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { buildWorkspaceGroups } from '../lib/workspaces';
 import { getModelDisplayLabel, getModelDisplayName, getModelProviderLabel, resolveModelHandle } from '../lib/ollama';
 import { PRESETS } from '../lib/presets';
-import type { ChatRecord, ProjectFolder, ThreadType } from '../types';
+import { attachmentsToStoredEntries, mergeImportableAttachments, readImportableAttachments, type ImportableAttachment } from '../lib/chatAttachments';
+import type { ChatReasoningEffort, ChatRecord, ProjectFolder, ThreadType } from '../types';
+import { ChatComposer, type ChatComposerOption } from './ChatComposer';
 import {
   IconCheck,
   IconChevronDown,
@@ -23,7 +25,9 @@ interface StartOptions {
   title: string;
   threadType: ThreadType;
   model?: string;
+  reasoningEffort?: ChatReasoningEffort;
   workspace?: { id: string; label: string };
+  fileEntries?: ChatRecord['fileEntries'];
 }
 
 interface Props {
@@ -134,6 +138,20 @@ const ROUTE_LAUNCHERS = [
 ] as const;
 
 const CHAT_START_PRESETS = PRESETS.filter((preset) => preset.id !== 'code');
+const CHAT_STARTER_PLACEHOLDER = "Ask anything... paste a URL and it'll be fetched automatically. Shift+Enter for newline.";
+const DEFAULT_REASONING_EFFORT: ChatReasoningEffort = 'balanced';
+const REASONING_EFFORT_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
+  { value: 'light', label: 'Low' },
+  { value: 'balanced', label: 'Balanced' },
+  { value: 'high', label: 'High' },
+  { value: 'extra-high', label: 'Extra High' },
+];
+const REASONING_EFFORT_CONFIG: Record<ChatReasoningEffort, { label: string; fetchDepth: 'standard' | 'deep'; minLiveSources: number }> = {
+  light: { label: 'Low', fetchDepth: 'standard', minLiveSources: 3 },
+  balanced: { label: 'Balanced', fetchDepth: 'standard', minLiveSources: 3 },
+  high: { label: 'High', fetchDepth: 'deep', minLiveSources: 4 },
+  'extra-high': { label: 'Extra High', fetchDepth: 'deep', minLiveSources: 5 },
+};
 
 function describeChatPreset(presetId: string): string {
   if (presetId === 'deep-research') {
@@ -198,13 +216,18 @@ export function PromptLibraryView({
   const [scrollTop, setScrollTop] = useState(0);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [presetPickerOpen, setPresetPickerOpen] = useState(false);
+  const [reasoningPickerOpen, setReasoningPickerOpen] = useState(false);
   const [selectedChatModel, setSelectedChatModel] = useState(defaultModel || models[0] || '');
   const [selectedChatPreset, setSelectedChatPreset] = useState('auto-chat');
+  const [selectedChatReasoningEffort, setSelectedChatReasoningEffort] = useState<ChatReasoningEffort>(DEFAULT_REASONING_EFFORT);
+  const [attachedChatFiles, setAttachedChatFiles] = useState<ImportableAttachment[]>([]);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const presetPickerRef = useRef<HTMLDivElement>(null);
+  const reasoningPickerRef = useRef<HTMLDivElement>(null);
 
   const showLibrary = page === 'landing';
-  const definition = page === 'landing' ? null : PAGE_DEFINITIONS[page];
+  const currentPage = page as PromptPage;
+  const definition = PAGE_DEFINITIONS[showLibrary ? 'chat' : page];
   const workspaceGroups = useMemo(() => buildWorkspaceGroups(chats, folders), [chats, folders]);
   const workspaceOptions = useMemo(
     () => workspaceGroups.filter((workspace) => workspace.id !== 'project:general'),
@@ -228,6 +251,19 @@ export function PromptLibraryView({
   const selectedModelLabel = getModelDisplayLabel(resolveModelHandle(defaultModel, models));
   const selectedChatModelLabel = getModelDisplayLabel(resolvedChatModel);
   const selectedChatPresetMeta = CHAT_START_PRESETS.find((preset) => preset.id === selectedChatPreset) ?? CHAT_START_PRESETS[0];
+  const composerReasoningOptions = REASONING_EFFORT_OPTIONS.map<ChatComposerOption>((option) => {
+    const optionConfig = REASONING_EFFORT_CONFIG[option.value];
+    return {
+      value: option.value,
+      label: option.label,
+      description: `${optionConfig.minLiveSources} live source${optionConfig.minLiveSources === 1 ? '' : 's'} minimum with a ${optionConfig.fetchDepth === 'deep' ? 'deep' : 'standard'} comparison pass.`,
+    };
+  });
+  const composerPresetOptions = CHAT_START_PRESETS.map<ChatComposerOption>((preset) => ({
+    value: preset.id,
+    label: preset.label,
+    description: describeChatPreset(preset.id),
+  }));
 
   useEffect(() => {
     if (page !== 'chat') return;
@@ -242,7 +278,7 @@ export function PromptLibraryView({
   }, [page, selectedChatPreset]);
 
   useEffect(() => {
-    if (!modelPickerOpen && !presetPickerOpen) return undefined;
+    if (!modelPickerOpen && !presetPickerOpen && !reasoningPickerOpen) return undefined;
 
     const handlePointerDown = (event: MouseEvent) => {
       if (!modelPickerRef.current?.contains(event.target as Node)) {
@@ -251,12 +287,16 @@ export function PromptLibraryView({
       if (!presetPickerRef.current?.contains(event.target as Node)) {
         setPresetPickerOpen(false);
       }
+      if (!reasoningPickerRef.current?.contains(event.target as Node)) {
+        setReasoningPickerOpen(false);
+      }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setModelPickerOpen(false);
         setPresetPickerOpen(false);
+        setReasoningPickerOpen(false);
       }
     };
 
@@ -266,7 +306,13 @@ export function PromptLibraryView({
       window.removeEventListener('mousedown', handlePointerDown);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [modelPickerOpen, presetPickerOpen]);
+  }, [modelPickerOpen, presetPickerOpen, reasoningPickerOpen]);
+
+  async function handleChatUploads(files: File[]) {
+    const imported = await readImportableAttachments(files);
+    if (!imported.length) return;
+    setAttachedChatFiles((current) => mergeImportableAttachments(current, imported));
+  }
 
   const handleStartChat = () => {
     if (!definition) return;
@@ -287,11 +333,14 @@ export function PromptLibraryView({
       title,
       threadType: definition.threadType,
       model: page === 'chat' ? resolvedChatModel : undefined,
+      reasoningEffort: page === 'chat' ? selectedChatReasoningEffort : undefined,
       workspace: definition.requiresWorkspace ? selectedWorkspace : undefined,
+      fileEntries: page === 'chat' ? attachmentsToStoredEntries(attachedChatFiles) : undefined,
     });
 
     if (started) {
       setPrompt('');
+      setAttachedChatFiles([]);
     }
   };
 
@@ -519,6 +568,45 @@ export function PromptLibraryView({
   }
 
   if (page === 'chat') {
+    return (
+      <div className={`route-starter route-starter-${page}${embedded ? ' route-starter-embedded' : ''}`}>
+        <section className="thread-zero" aria-label="New conversation composer">
+          <div className="thread-zero-spacer" />
+
+          <div className="panel-input thread-zero-chatbar">
+            <ChatComposer
+              value={prompt}
+              onValueChange={setPrompt}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  handleStartChat();
+                }
+              }}
+              placeholder={CHAT_STARTER_PLACEHOLDER}
+              ariaLabel={CHAT_STARTER_PLACEHOLDER}
+              uploadTitle="Upload files or a zip before starting this chat"
+              uploadActive={attachedChatFiles.length > 0}
+              onUploadFiles={handleChatUploads}
+              reasoningValue={selectedChatReasoningEffort}
+              reasoningOptions={composerReasoningOptions}
+              onReasoningChange={(value) => setSelectedChatReasoningEffort(value as ChatReasoningEffort)}
+              presetValue={selectedChatPreset}
+              presetOptions={composerPresetOptions}
+              onPresetChange={setSelectedChatPreset}
+              modelValue={resolvedChatModel}
+              modelOptions={models}
+              onModelChange={setSelectedChatModel}
+              onSend={handleStartChat}
+              sendDisabled={!prompt.trim()}
+            />
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (false && page === 'chat') {
     return (
       <div className={`route-starter route-starter-${page}${embedded ? ' route-starter-embedded' : ''}`}>
         <section className="chat-starter-shell">
@@ -880,7 +968,7 @@ export function PromptLibraryView({
           <h1>{definition.title}</h1>
           <p>{definition.description}</p>
         </div>
-        {page !== 'chat' && (
+        {currentPage !== 'chat' && (
           <div className="route-starter-meta">
             <span className="route-starter-meta-label">Default model</span>
             <strong>{selectedModelLabel}</strong>
@@ -973,14 +1061,14 @@ export function PromptLibraryView({
         </label>
 
         <div className="launch-controls">
-          <div className={`launch-inline-actions${page === 'chat' ? ' chat-start-actions' : ''}`}>
+          <div className={`launch-inline-actions${currentPage === 'chat' ? ' chat-start-actions' : ''}`}>
             <button
               type="button"
-              className={`launch-action-btn primary${page === 'chat' ? ' chat-send-action' : ''}`}
+              className={`launch-action-btn primary${currentPage === 'chat' ? ' chat-send-action' : ''}`}
               disabled={!canLaunch}
               onClick={handleStartChat}
             >
-              {page === 'chat' ? (
+              {currentPage === 'chat' ? (
                 <>
                   <span className="chat-send-action-icon-shell">
                     <span className="chat-send-action-icon-float">
@@ -1009,7 +1097,7 @@ export function PromptLibraryView({
               )}
             </button>
 
-            {page === 'chat' && (
+            {currentPage === 'chat' && (
               <div className={`model-picker${presetPickerOpen ? ' open' : ''}`} ref={presetPickerRef}>
                 <button
                   type="button"
@@ -1074,7 +1162,7 @@ export function PromptLibraryView({
               </div>
             )}
 
-            {page === 'chat' && (
+            {currentPage === 'chat' && (
               <div className={`model-picker${modelPickerOpen ? ' open' : ''}`} ref={modelPickerRef}>
                 <button
                   type="button"

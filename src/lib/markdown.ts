@@ -145,7 +145,7 @@ function preprocess(raw: string): string {
   // FILE: marker or end-of-string. We infer the language from the file extension.
   raw = raw.replace(
     /^(\/\/\s*FILE:\s*(\S+)|#\s*FILE:\s*(\S+))\n([\s\S]+?)(?=\n\n|\n\/\/\s*FILE:|\n#\s*FILE:|$)/gm,
-    (match, fileLine, extFromSlash, extFromHash) => {
+    (match, fileLine) => {
       // If this FILE line is already preceded by a fence opener on the previous line,
       // do nothing — it's already inside a code block.
       // We detect this by checking if the match starts at pos 0 or the char before is \n

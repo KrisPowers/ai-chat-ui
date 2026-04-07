@@ -50,6 +50,33 @@ interface SearchResultItem {
   publishedAt?: string;
 }
 
+export interface DeepResearchSearchEngineProbe {
+  engine: 'duckduckgo' | 'google';
+  label: string;
+  status: 'pass' | 'fail';
+  caseName: string;
+  query: string;
+  expectedEvidence: string;
+  durationMs: number;
+  searchResultCount: number;
+  scrapedPageCount: number;
+  verifiedUrl?: string;
+  verifiedTitle?: string;
+  rootCause?: string;
+  reasoning: string;
+}
+
+export interface DeepResearchSearchEngineTestResult {
+  status: 'pass' | 'fail';
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  summary: string;
+  reasoning: string;
+  reportText: string;
+  probes: DeepResearchSearchEngineProbe[];
+}
+
 interface FetchPageOptions {
   provider: string;
   sourceType: FetchedSourceType;
@@ -70,6 +97,26 @@ interface ContextFormattingOptions {
   depth?: FetchContextDepth;
 }
 
+interface SearchEngineDiagnosticCase {
+  name: string;
+  query: string;
+  expectedEvidence: string;
+  expectedMatchGroups: string[][];
+}
+
+interface SearchEngineDiagnosticAttempt {
+  source: 'direct-html' | 'reader-fallback';
+  status: 'pass' | 'fail';
+  url: string;
+  httpStatus?: number;
+  bodyLength?: number;
+  parsedCount: number;
+  potentialLinkCount: number;
+  causeCode: 'proxy-unavailable' | 'http-error' | 'blocked' | 'parser-mismatch' | 'no-results' | 'empty-body' | 'short-body' | 'unknown';
+  detail: string;
+  items: SearchResultItem[];
+}
+
 const URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
 const YEAR_RE = /\b(19\d{2}|20\d{2}|21\d{2})\b/g;
 const QUESTION_RE = /[?]|^(who|what|when|where|why|how|is|are|can|could|would|will|do|does|did|has|have|was|were|tell me|explain)\b/i;
@@ -81,7 +128,7 @@ const FOLLOW_UP_ENTITY_RE = /\b(it|its|they|them|their|that|this|those|these|mis
 const STATUS_UPDATE_RE = /\b(status|timeline|latest|current|today|now|update|updates|what'?s going on|what is going on|happening|what happened|plan|next steps)\b/i;
 const SPACE_RE = /\b(nasa|moon|mars|esa|space|launch|rocket|mission|orbiter|crew|astronaut|lunar|spacex|iss|jaxa|isro|csa)\b/i;
 const GOVERNMENT_RE = /\b(government|official|agency|department|ministry|policy|president|prime minister|parliament|congress|senate|white house|state department|embassy|statement|announced|sanctions|treaty)\b/i;
-const US_FEDERAL_RE = /\b(u\.?s\.?|united states|america(?:n)?|federal|white house|congress|senate|house|pentagon|homeland security|justice department|state department|treasury|nasa|cia|fbi|nsa|cdc|nih|fda|epa|irs|noaa|usda|faa|dhs|doj|dod|va|cisa|secret service)\b/i;
+export const US_FEDERAL_RE = /\b(u\.?s\.?|united states|america(?:n)?|federal|white house|congress|senate|house|pentagon|homeland security|justice department|state department|treasury|nasa|cia|fbi|nsa|cdc|nih|fda|epa|irs|noaa|usda|faa|dhs|doj|dod|va|cisa|secret service)\b/i;
 const TECHNICAL_RE = /\b(code|programming|typescript|javascript|python|react|node|api|framework|library|package|bug|debug|error|forum|reddit|hacker news|discussion)\b/i;
 const COMMUNITY_RE = /\b(reddit|forum|hacker news|community|discussion|opinion|what are people saying|social media|sentiment)\b/i;
 const CASUAL_QUERY_RE = /^(hi|hello|hey|yo|sup|good\s+(morning|afternoon|evening)|thanks|thank you|thx|ok|okay|cool|nice|who are you|what can you do|how are you|help|help me|test)\W*$/i;
@@ -103,8 +150,29 @@ const GLOBAL_CONTEXT_BUDGET_STANDARD_MS = 15_000;
 const GLOBAL_CONTEXT_BUDGET_DEEP_MS = 24_000;
 const RECOVERY_CONTEXT_BUDGET_STANDARD_MS = 7_500;
 const RECOVERY_CONTEXT_BUDGET_DEEP_MS = 12_000;
+const SEARCH_ENGINE_DIAGNOSTIC_VERSION = '2026-04-07-operational-recovery-v6';
 const LOCAL_FETCH_PROXY_PATH = '/__fetch?url=';
 const READER_PROXY = 'https://r.jina.ai/http://';
+const SEARCH_ENGINE_DIAGNOSTIC_CASES: SearchEngineDiagnosticCase[] = [
+  {
+    name: 'Encyclopedic fact probe',
+    query: '"Albert Einstein" theoretical physicist',
+    expectedEvidence: 'a readable page that identifies Albert Einstein as a physicist',
+    expectedMatchGroups: [
+      ['albert einstein'],
+      ['theoretical physicist', 'physicist'],
+    ],
+  },
+  {
+    name: 'Example domain probe',
+    query: '"Example Domain" illustrative examples',
+    expectedEvidence: 'a readable page that describes Example Domain as being for illustrative examples',
+    expectedMatchGroups: [
+      ['example domain'],
+      ['illustrative examples', 'illustrative example'],
+    ],
+  },
+];
 
 const WORLD_NEWS_DOMAINS = [
   'reuters.com',
@@ -130,7 +198,7 @@ const WORLD_NEWS_DOMAINS = [
   'thehill.com',
   'news.sky.com',
 ];
-const SCIENCE_NEWS_DOMAINS = [
+export const SCIENCE_NEWS_DOMAINS = [
   'space.com',
   'spaceflightnow.com',
   'spacenews.com',
@@ -324,7 +392,7 @@ const SCHEDULE_LANGUAGE_RE = /\b(schedule[ds]?|reschedule[ds]?|delay(?:ed|s)?|po
 const POST_EVENT_LANGUAGE_RE = /\b(launched|launch occurred|lifted off|liftoff|took place|occurred|happened|completed|is in orbit|currently in orbit|orbiting|flew|returned|returning|splashed down|splashdown|crew(?:ed)?\s+mission launched)\b/i;
 const ACTIVE_STATUS_LANGUAGE_RE = /\b(currently|underway|in transit|on track|is expected to|expected to reach|scheduled to return|will return|will reach|is heading|en route)\b/i;
 const CREW_NAME_RE = /\b([A-Z][a-z]+(?:[-'][A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?){1,3})\b/g;
-const CREW_ROLE_WINDOW = 48;
+export const CREW_ROLE_WINDOW = 48;
 const CREW_SEGMENT_HINT_RE = /\b(crew|astronaut|pilot|commander|mission specialist|flight engineer|roster|mission crew|flight crew|spacecraft|capsule|orbiter|aboard|crew member)\b/i;
 const CREW_NAME_BLOCKLIST = new Set([
   'Kennedy Space Center',
@@ -974,7 +1042,7 @@ async function fetchPageViaReader(url: string, timeoutMs: number, signal?: Abort
   };
 }
 
-async function fetchSearchSnapshot(options: {
+export async function fetchSearchSnapshot(options: {
   url: string;
   title: string;
   provider: string;
@@ -1254,6 +1322,30 @@ function parseGoogleSearchItems(html: string, limit = 8): SearchResultItem[] {
   return mergeSearchResultItems([...structuredItems, ...genericItems], limit);
 }
 
+function parseStartpageSearchItems(html: string, limit = 8): SearchResultItem[] {
+  const matches = [...html.matchAll(
+    /<a[^>]+class="[^"]*result-title[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>(?:[\s\S]*?<p[^>]+class="[^"]*description[^"]*"[^>]*>([\s\S]*?)<\/p>)?/gi,
+  )];
+
+  return matches
+    .map((match) => {
+      const snippet = normalizeWhitespace(htmlToText(match[3] ?? ''));
+      return {
+        title: normalizeWhitespace(htmlToText(match[2] ?? '')),
+        snippet,
+        url: normalizeWhitespace((match[1] ?? '').replace(/&amp;/g, '&')),
+        publishedAt: extractPublishedAtFromSnippet(snippet),
+      };
+    })
+    .filter((item) => item.title && item.url.startsWith('http'))
+    .filter((item) => {
+      const hostname = extractHostname(item.url);
+      return hostname && !isSearchEngineHost(hostname);
+    })
+    .filter((item, index, array) => array.findIndex((entry) => entry.url === item.url) === index)
+    .slice(0, limit);
+}
+
 function parseBingSearchItems(html: string, limit = 8): SearchResultItem[] {
   const results = [...html.matchAll(/<li[^>]+class="[^"]*b_algo[^"]*"[^>]*>[\s\S]*?<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>[\s\S]*?(?:<p>([\s\S]*?)<\/p>)?[\s\S]*?<\/li>/gi)]
     .map((match) => {
@@ -1332,7 +1424,15 @@ function isBlockedGoogleSearchContent(text: string): boolean {
   const lower = text.toLowerCase();
   return lower.includes('our systems have detected unusual traffic')
     || lower.includes('please enable javascript on your web browser')
-    || lower.includes('this page checks to see if it\'s really you');
+    || lower.includes('this page checks to see if it\'s really you')
+    || lower.includes("if you're having trouble accessing google search");
+}
+
+function isBlockedStartpageSearchContent(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes('startpage captcha')
+    || lower.includes('captcha page')
+    || lower.includes('/sp/captcha');
 }
 
 function formatSearchItems(items: SearchResultItem[]): string {
@@ -1478,11 +1578,7 @@ function isScrapableSearchResult(url: string): boolean {
     const parsed = new URL(url);
     if (!/^https?:$/i.test(parsed.protocol)) return false;
     const hostname = parsed.hostname.replace(/^www\./i, '');
-    return ![
-      'google.com',
-      'duckduckgo.com',
-      'news.google.com',
-    ].includes(hostname);
+    return !isSearchEngineHost(hostname);
   } catch {
     return false;
   }
@@ -1520,7 +1616,623 @@ async function scrapeSearchResultItems(
   return results.filter((context) => !context.error && context.text.trim().length >= (options.minTextLength ?? 120));
 }
 
-async function collectDestinationContextsFromItems(
+function matchesSearchEngineDiagnosticCase(context: FetchedContext, testCase: SearchEngineDiagnosticCase): boolean {
+  const haystack = normalizeWhitespace([
+    context.title,
+    context.url,
+    context.text,
+  ].filter(Boolean).join(' ')).toLowerCase();
+
+  return testCase.expectedMatchGroups.every((group) => group.some((candidate) => haystack.includes(candidate.toLowerCase())));
+}
+
+function formatDiagnosticTitles(contexts: FetchedContext[]): string {
+  const titles = contexts
+    .slice(0, 3)
+    .map((context) => normalizeWhitespace(context.title))
+    .filter(Boolean);
+
+  return titles.length ? titles.join(' | ') : 'No scraped page titles captured.';
+}
+
+function countPotentialHtmlResultLinks(
+  html: string,
+  decodeUrl: (rawHref: string) => string,
+): number {
+  const links = new Set<string>();
+  for (const match of html.matchAll(/<a\b[^>]+href="([^"]+)"/gi)) {
+    const resolvedUrl = decodeUrl(match[1] ?? '');
+    const hostname = extractHostname(resolvedUrl);
+    if (!resolvedUrl.startsWith('http')) continue;
+    if (!hostname || isSearchEngineHost(hostname)) continue;
+    links.add(resolvedUrl);
+  }
+  return links.size;
+}
+
+function countPotentialReaderResultLinks(
+  text: string,
+  decodeUrl: (rawHref: string) => string,
+): number {
+  const links = new Set<string>();
+  for (const match of text.matchAll(/\[[^\]]+]\((https?:\/\/[^\s)]+)\)/g)) {
+    const resolvedUrl = decodeUrl(match[1] ?? '');
+    const hostname = extractHostname(resolvedUrl);
+    if (!resolvedUrl.startsWith('http')) continue;
+    if (!hostname || isSearchEngineHost(hostname)) continue;
+    links.add(resolvedUrl);
+  }
+  return links.size;
+}
+
+function readDiagnosticProxyError(body: string): string | null {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: unknown; url?: unknown; };
+    return typeof parsed.error === 'string' ? parsed.error.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function detectSearchBlockReason(engine: 'duckduckgo' | 'google', body: string): string | null {
+  const lower = body.toLowerCase();
+  if (engine === 'google' && isBlockedGoogleSearchContent(body)) {
+    return 'Google returned an anti-bot or JavaScript challenge instead of normal result markup.';
+  }
+  if (
+    lower.includes('captcha')
+    || lower.includes('verify you are human')
+    || lower.includes('human verification')
+    || lower.includes('unusual traffic')
+    || lower.includes('access denied')
+    || lower.includes('temporarily blocked')
+    || lower.includes('automated queries')
+  ) {
+    return 'The search engine returned a bot-detection or access-control page.';
+  }
+  if (lower.includes('please enable javascript') || lower.includes('javascript is required')) {
+    return 'The search engine returned a JavaScript-required page instead of directly parseable results.';
+  }
+  return null;
+}
+
+function hasSearchNoResultsSignal(body: string): boolean {
+  const lower = body.toLowerCase();
+  return lower.includes('did not match any documents')
+    || lower.includes('no results found')
+    || lower.includes('no results')
+    || lower.includes('there are no results')
+    || lower.includes('no more results');
+}
+
+function describeSearchAttemptSource(source: SearchEngineDiagnosticAttempt['source']): string {
+  return source === 'direct-html' ? 'Direct HTML search fetch' : 'Reader fallback fetch';
+}
+
+async function runDiagnosticSearchAttempt(
+  engine: 'duckduckgo' | 'google',
+  query: string,
+  source: SearchEngineDiagnosticAttempt['source'],
+): Promise<SearchEngineDiagnosticAttempt> {
+  const limit = 8;
+  const searchUrl = source === 'direct-html'
+    ? engine === 'duckduckgo'
+      ? `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&s=0&dc=1`
+      : `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&num=${Math.max(limit, 10)}&start=0`
+    : engine === 'duckduckgo'
+      ? `${READER_PROXY}https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`
+      : `${READER_PROXY}https://www.google.com/search?gbv=1&q=${encodeURIComponent(query)}&hl=en&num=${Math.max(limit, 10)}&start=0`;
+
+  const decodeUrl = engine === 'duckduckgo' ? decodeDuckDuckGoResultUrl : decodeGoogleResultUrl;
+  const parseItems = source === 'direct-html'
+    ? (body: string) => (engine === 'duckduckgo' ? parseDuckDuckGoSearchItems(body, limit) : parseGoogleSearchItems(body, limit))
+    : (body: string) => parseReaderSearchItems(body, { decodeUrl, limit });
+  const countPotentialLinks = source === 'direct-html'
+    ? (body: string) => countPotentialHtmlResultLinks(body, decodeUrl)
+    : (body: string) => countPotentialReaderResultLinks(body, decodeUrl);
+
+  try {
+    const response = await fetchThroughLocalProxy(searchUrl, FETCH_SEARCH_TIMEOUT_MS);
+    const body = await response.text();
+    const bodyLength = body.length;
+
+    if (!response.ok) {
+      const proxyError = readDiagnosticProxyError(body);
+      return {
+        source,
+        status: 'fail',
+        url: searchUrl,
+        httpStatus: response.status,
+        bodyLength,
+        parsedCount: 0,
+        potentialLinkCount: 0,
+        causeCode: 'http-error',
+        detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}${proxyError ? `: ${proxyError}` : '.'}`,
+        items: [],
+      };
+    }
+
+    if (!body.trim()) {
+      return {
+        source,
+        status: 'fail',
+        url: searchUrl,
+        httpStatus: response.status,
+        bodyLength,
+        parsedCount: 0,
+        potentialLinkCount: 0,
+        causeCode: 'empty-body',
+        detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}, but the response body was empty.`,
+        items: [],
+      };
+    }
+
+    const items = parseItems(body);
+    const potentialLinkCount = countPotentialLinks(body);
+    if (items.length > 0) {
+      return {
+        source,
+        status: 'pass',
+        url: searchUrl,
+        httpStatus: response.status,
+        bodyLength,
+        parsedCount: items.length,
+        potentialLinkCount,
+        causeCode: 'unknown',
+        detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status} and parsed ${items.length} result link${items.length === 1 ? '' : 's'}.`,
+        items,
+      };
+    }
+
+    const blockedReason = detectSearchBlockReason(engine, body);
+    if (blockedReason) {
+      return {
+        source,
+        status: 'fail',
+        url: searchUrl,
+        httpStatus: response.status,
+        bodyLength,
+        parsedCount: 0,
+        potentialLinkCount,
+        causeCode: 'blocked',
+        detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}, but ${blockedReason}`,
+        items: [],
+      };
+    }
+
+    if (hasSearchNoResultsSignal(body)) {
+      return {
+        source,
+        status: 'fail',
+        url: searchUrl,
+        httpStatus: response.status,
+        bodyLength,
+        parsedCount: 0,
+        potentialLinkCount,
+        causeCode: 'no-results',
+        detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}, but the page reported no results for the probe query.`,
+        items: [],
+      };
+    }
+
+    if (potentialLinkCount > 0) {
+      return {
+        source,
+        status: 'fail',
+        url: searchUrl,
+        httpStatus: response.status,
+        bodyLength,
+        parsedCount: 0,
+        potentialLinkCount,
+        causeCode: 'parser-mismatch',
+        detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status} and exposed ${potentialLinkCount} potential outbound link${potentialLinkCount === 1 ? '' : 's'}, but the parser extracted 0 results. This usually means the search-result markup changed and the parser no longer matches it.`,
+        items: [],
+      };
+    }
+
+    return {
+      source,
+      status: 'fail',
+      url: searchUrl,
+      httpStatus: response.status,
+      bodyLength,
+      parsedCount: 0,
+      potentialLinkCount,
+      causeCode: bodyLength < 500 ? 'short-body' : 'unknown',
+      detail: bodyLength < 500
+        ? `${describeSearchAttemptSource(source)} returned an unusually short HTTP ${response.status} response (${bodyLength} characters) with no parseable result links.`
+        : `${describeSearchAttemptSource(source)} returned a non-empty HTTP ${response.status} response (${bodyLength} characters), but no result links could be parsed and no clear block/no-results signal was detected.`,
+      items: [],
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      source,
+      status: 'fail',
+      url: searchUrl,
+      parsedCount: 0,
+      bodyLength: 0,
+      potentialLinkCount: 0,
+      causeCode: message.includes('Local fetch proxy unavailable') ? 'proxy-unavailable' : 'http-error',
+      detail: `${describeSearchAttemptSource(source)} failed before parsing: ${message}`,
+      items: [],
+    };
+  }
+}
+
+function summarizeSearchAttemptFailure(attempts: SearchEngineDiagnosticAttempt[]): { rootCause: string; evidence: string[]; } {
+  const evidence = attempts.map((attempt) => attempt.detail);
+  const causeCodes = attempts.map((attempt) => attempt.causeCode);
+
+  if (causeCodes.includes('proxy-unavailable')) {
+    return {
+      rootCause: 'The app session was not connected to a working local /__fetch proxy, so the diagnostic could not reliably reach the search engine.',
+      evidence,
+    };
+  }
+
+  if (causeCodes.includes('blocked')) {
+    return {
+      rootCause: 'The search engine returned a bot-detection, JavaScript challenge, or other access-control page instead of normal results.',
+      evidence,
+    };
+  }
+
+  if (causeCodes.every((code) => code === 'parser-mismatch')) {
+    return {
+      rootCause: 'The search response format appears to have changed and no longer matches the parser.',
+      evidence,
+    };
+  }
+
+  if (causeCodes.every((code) => code === 'no-results')) {
+    return {
+      rootCause: 'The probe query unexpectedly returned no search results, so scraping never started.',
+      evidence,
+    };
+  }
+
+  if (causeCodes.includes('http-error')) {
+    return {
+      rootCause: 'The search request failed before parsing because the upstream response returned an HTTP or proxy-level error.',
+      evidence,
+    };
+  }
+
+  if (causeCodes.includes('empty-body') || causeCodes.includes('short-body')) {
+    return {
+      rootCause: 'The search engine responded, but the body was empty or too thin to contain parseable results.',
+      evidence,
+    };
+  }
+
+  return {
+    rootCause: 'The search engine responded, but the diagnostic could not extract parseable result links.',
+    evidence,
+  };
+}
+
+async function fetchSearchResultsWithDiagnostic(
+  engine: 'duckduckgo' | 'google',
+  query: string,
+): Promise<{ items: SearchResultItem[]; rootCause?: string; evidence: string[]; }> {
+  const directAttempt = await runDiagnosticSearchAttempt(engine, query, 'direct-html');
+  if (directAttempt.status === 'pass') {
+    return {
+      items: directAttempt.items,
+      evidence: [directAttempt.detail],
+    };
+  }
+
+  if (directAttempt.causeCode === 'proxy-unavailable') {
+    const failure = summarizeSearchAttemptFailure([directAttempt]);
+    return {
+      items: [],
+      rootCause: failure.rootCause,
+      evidence: failure.evidence,
+    };
+  }
+
+  const readerAttempt = await runDiagnosticSearchAttempt(engine, query, 'reader-fallback');
+  if (readerAttempt.status === 'pass') {
+    return {
+      items: readerAttempt.items,
+      evidence: [directAttempt.detail, readerAttempt.detail],
+    };
+  }
+
+  const failure = summarizeSearchAttemptFailure([directAttempt, readerAttempt]);
+
+  try {
+    const recoveredItems = await (
+      engine === 'duckduckgo'
+        ? fetchDuckDuckGoSearchResults(query, 8)
+        : fetchGoogleSearchResults(query, 8)
+    );
+    if (recoveredItems.length > 0) {
+      return {
+        items: recoveredItems,
+        evidence: [
+          ...failure.evidence,
+          engine === 'google'
+            ? `Operational Google fetch chain recovered ${recoveredItems.length} result link${recoveredItems.length === 1 ? '' : 's'} via the production fallback path after the Google-only diagnostic probes failed.`
+            : `Operational DuckDuckGo fetch chain recovered ${recoveredItems.length} result link${recoveredItems.length === 1 ? '' : 's'} via the production fetch path after the diagnostic probes failed.`,
+        ],
+      };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    failure.evidence.push(`Operational recovery chain failed after the diagnostic probes: ${message}`);
+  }
+
+  return {
+    items: [],
+    rootCause: failure.rootCause,
+    evidence: failure.evidence,
+  };
+}
+
+function summarizeScrapeFailure(contexts: FetchedContext[]): { rootCause: string; evidence: string[]; } {
+  const evidence = contexts.map((context) => {
+    const hostname = extractHostname(context.url) || context.url;
+    return context.error
+      ? `${hostname}: ${context.error}`
+      : `${hostname}: only ${context.text.trim().length} characters of readable text were extracted, which is below the verification threshold.`;
+  });
+
+  if (contexts.every((context) => context.error?.includes('Local fetch proxy unavailable'))) {
+    return {
+      rootCause: 'Destination-page scraping failed because the local /__fetch proxy was unavailable while opening result pages.',
+      evidence,
+    };
+  }
+
+  if (contexts.every((context) => context.error?.includes('Insufficient page text'))) {
+    return {
+      rootCause: 'The result pages loaded, but they did not expose enough readable text to verify content. This usually points to JS-heavy pages, gated pages, or extraction rules that are too strict.',
+      evidence,
+    };
+  }
+
+  if (contexts.every((context) => context.error)) {
+    return {
+      rootCause: 'Every sampled destination page failed during scraping before enough readable text could be extracted.',
+      evidence,
+    };
+  }
+
+  return {
+    rootCause: 'Search results were parsed, but the linked pages did not yield enough readable content for verification.',
+    evidence,
+  };
+}
+
+async function runSearchEngineDiagnosticProbe(engine: 'duckduckgo' | 'google'): Promise<DeepResearchSearchEngineProbe> {
+  const startedAt = nowMs();
+  const label = engine === 'duckduckgo' ? 'DuckDuckGo' : 'Google Search';
+  const caseFailures: Array<{
+    caseName: string;
+    rootCause: string;
+    evidence: string[];
+  }> = [];
+  let bestSearchResultCount = 0;
+  let bestScrapedPageCount = 0;
+
+  for (const testCase of SEARCH_ENGINE_DIAGNOSTIC_CASES) {
+    const searchFetch = await fetchSearchResultsWithDiagnostic(engine, testCase.query);
+    const items = mergeSearchResultItems(searchFetch.items, 8);
+
+    bestSearchResultCount = Math.max(bestSearchResultCount, items.length);
+    if (!items.length) {
+      caseFailures.push({
+        caseName: testCase.name,
+        rootCause: searchFetch.rootCause ?? 'The diagnostic could not fetch and parse any search results.',
+        evidence: searchFetch.evidence,
+      });
+      continue;
+    }
+
+    const scrapeCandidates = items
+      .filter((item) => isScrapableSearchResult(item.url))
+      .slice(0, 3);
+    if (!scrapeCandidates.length) {
+      caseFailures.push({
+        caseName: testCase.name,
+        rootCause: 'Search results were parsed, but none of the returned links were usable destination pages for scraping.',
+        evidence: [
+          ...searchFetch.evidence,
+          `Parsed results only exposed search-engine or unsupported links. Top result URLs: ${items.slice(0, 3).map((item) => item.url).join(' | ') || 'none'}.`,
+        ],
+      });
+      continue;
+    }
+
+    const inspectedPages = await Promise.all(
+      scrapeCandidates.map((item) => fetchReadablePage(item.url, {
+        provider: extractHostname(item.url) || label,
+        sourceType: 'search',
+        credibility: 'search',
+        title: item.title,
+        publishedAt: item.publishedAt,
+        timeoutMs: FETCH_SEARCH_SCRAPE_TIMEOUT_MS,
+        minTextLength: 140,
+      })),
+    );
+
+    const scraped = inspectedPages.filter((context) => !context.error && context.text.trim().length >= 140);
+    bestScrapedPageCount = Math.max(bestScrapedPageCount, scraped.length);
+    if (!scraped.length) {
+      const scrapeFailure = summarizeScrapeFailure(inspectedPages);
+      caseFailures.push({
+        caseName: testCase.name,
+        rootCause: scrapeFailure.rootCause,
+        evidence: [...searchFetch.evidence, ...scrapeFailure.evidence],
+      });
+      continue;
+    }
+
+    const verified = scraped.find((context) => matchesSearchEngineDiagnosticCase(context, testCase));
+    if (verified) {
+      return {
+        engine,
+        label,
+        status: 'pass',
+        caseName: testCase.name,
+        query: testCase.query,
+        expectedEvidence: testCase.expectedEvidence,
+        durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+        searchResultCount: items.length,
+        scrapedPageCount: scraped.length,
+        verifiedUrl: verified.url,
+        verifiedTitle: verified.title,
+        reasoning: `${searchFetch.evidence.join(' ')} Scraped ${scraped.length} destination page${scraped.length === 1 ? '' : 's'} and verified ${testCase.expectedEvidence}.`,
+      };
+    }
+
+    caseFailures.push({
+      caseName: testCase.name,
+      rootCause: 'Search fetching and scraping both worked, but the scraped pages did not contain the expected verification evidence.',
+      evidence: [
+        ...searchFetch.evidence,
+        `Scraped ${scraped.length} readable page${scraped.length === 1 ? '' : 's'}, but none contained ${testCase.expectedEvidence}. Top scraped titles: ${formatDiagnosticTitles(scraped)}.`,
+      ],
+    });
+  }
+
+  const fallbackCase = SEARCH_ENGINE_DIAGNOSTIC_CASES[0];
+  const rootCause = caseFailures.length === 1
+    ? caseFailures[0].rootCause
+    : caseFailures.length > 1 && caseFailures.every((failure) => failure.rootCause === caseFailures[0].rootCause)
+      ? caseFailures[0].rootCause
+      : 'All probe cases failed, but not for the same reason. Review the per-case evidence below for the exact break point in each run.';
+  const reasoning = caseFailures.length
+    ? caseFailures.map((failure) => `${failure.caseName}: Root cause: ${failure.rootCause} Evidence: ${failure.evidence.join(' ')}`).join(' ')
+    : 'All verification probes failed without returning a usable diagnostic trail.';
+
+  return {
+    engine,
+    label,
+    status: 'fail',
+    caseName: fallbackCase.name,
+    query: fallbackCase.query,
+    expectedEvidence: fallbackCase.expectedEvidence,
+    durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+    searchResultCount: bestSearchResultCount,
+    scrapedPageCount: bestScrapedPageCount,
+    rootCause,
+    reasoning,
+  };
+}
+
+function buildDeepResearchSearchEngineReport(result: DeepResearchSearchEngineTestResult): string {
+  const lines = [
+    '# Deep Research Search Engine Test Report',
+    '',
+    'Use this file as-is when reporting a failed search-engine diagnostic to developers or when asking Codex/ChatGPT to help debug the fetch pipeline.',
+    'Attach or paste the full file so the exact engine-level reasoning is preserved.',
+    '',
+    '## Overview',
+    '',
+    `- Diagnostic version: ${SEARCH_ENGINE_DIAGNOSTIC_VERSION}`,
+    `- Status: ${result.status.toUpperCase()}`,
+    `- Started: ${result.startedAt}`,
+    `- Completed: ${result.completedAt}`,
+    `- Duration: ${result.durationMs}ms`,
+    '',
+    '## Summary',
+    '',
+    result.summary,
+    '',
+    '## Reasoning',
+    '',
+    result.reasoning || 'No additional reasoning captured.',
+    '',
+    '## Engine Results',
+    '',
+    ...result.probes.flatMap((probe) => [
+      `### ${probe.label}`,
+      '',
+      `- Status: ${probe.status.toUpperCase()}`,
+      `- Duration: ${probe.durationMs}ms`,
+      `- Probe: ${probe.caseName}`,
+      `- Query: ${probe.query}`,
+      `- Expected evidence: ${probe.expectedEvidence}`,
+      `- Search results parsed: ${probe.searchResultCount}`,
+      `- Destination pages scraped: ${probe.scrapedPageCount}`,
+      probe.verifiedUrl ? `- Verified URL: ${probe.verifiedUrl}` : '',
+      probe.verifiedTitle ? `- Verified title: ${probe.verifiedTitle}` : '',
+      probe.rootCause ? `- Root cause: ${probe.rootCause}` : '',
+      `- Reasoning: ${probe.reasoning}`,
+      '',
+    ]).filter(Boolean),
+  ];
+
+  if (!result.probes.length) {
+    lines.push('No per-engine probe results were captured.');
+    lines.push('');
+  }
+
+  lines.push('## Developer Request');
+  lines.push('');
+  lines.push('Please inspect the deep-research fetch path for DuckDuckGo and Google Search, including search-result fetching, parsing, destination-page scraping, and verification logic.');
+  lines.push('');
+
+  return lines.join('\n').trim();
+}
+
+export async function runDeepResearchSearchEngineTest(): Promise<DeepResearchSearchEngineTestResult> {
+  const startedAtIso = new Date().toISOString();
+  const startedAt = nowMs();
+
+  try {
+    const probes: DeepResearchSearchEngineProbe[] = [];
+    for (const engine of ['duckduckgo', 'google'] as const) {
+      probes.push(await runSearchEngineDiagnosticProbe(engine));
+    }
+
+    const failedLabels = probes.filter((probe) => probe.status === 'fail').map((probe) => probe.label);
+    const status: DeepResearchSearchEngineTestResult['status'] = failedLabels.length ? 'fail' : 'pass';
+    const summary = status === 'pass'
+      ? 'DuckDuckGo and Google Search both passed the deep research fetch diagnostic.'
+      : `${failedLabels.join(' and ')} failed the deep research fetch diagnostic.`;
+    const reasoning = status === 'pass'
+      ? probes.map((probe) => `${probe.label}: ${probe.reasoning}`).join(' ')
+      : probes.filter((probe) => probe.status === 'fail').map((probe) => `${probe.label}: ${probe.reasoning}`).join(' ');
+
+    const result: DeepResearchSearchEngineTestResult = {
+      status,
+      startedAt: startedAtIso,
+      completedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+      summary,
+      reasoning,
+      reportText: '',
+      probes,
+    };
+
+    result.reportText = buildDeepResearchSearchEngineReport(result);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const result: DeepResearchSearchEngineTestResult = {
+      status: 'fail',
+      startedAt: startedAtIso,
+      completedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+      summary: 'The deep research fetch diagnostic crashed before both search engines could be checked.',
+      reasoning: message,
+      reportText: '',
+      probes: [],
+    };
+
+    result.reportText = buildDeepResearchSearchEngineReport(result);
+    return result;
+  }
+}
+
+export async function collectDestinationContextsFromItems(
   items: SearchResultItem[],
   options: {
     provider: string;
@@ -1656,15 +2368,36 @@ async function fetchGoogleSearchResults(
 ): Promise<SearchResultItem[]> {
   const normalizedOffset = Math.max(0, offset);
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&num=${Math.max(limit, 10)}&start=${normalizedOffset}`;
+  const fallbackErrors: string[] = [];
   try {
     const response = await fetchThroughLocalProxy(searchUrl, FETCH_SEARCH_TIMEOUT_MS, signal);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const html = await response.text();
     if (!html) throw new Error('Empty');
+    if (isBlockedGoogleSearchContent(html)) throw new Error('Google search blocked');
     const items = parseGoogleSearchItems(html, limit);
     if (!items.length) throw new Error('No results parsed');
     return items;
-  } catch {
+  } catch (error) {
+    fallbackErrors.push(`google html: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    const startpagePage = Math.max(1, Math.floor(normalizedOffset / Math.max(limit, 1)) + 1);
+    const startpageUrl = `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&page=${startpagePage}`;
+    const response = await fetchThroughLocalProxy(startpageUrl, FETCH_SEARCH_TIMEOUT_MS, signal);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const html = await response.text();
+    if (!html) throw new Error('Empty');
+    if (isBlockedStartpageSearchContent(html)) throw new Error('Startpage search blocked');
+    const items = parseStartpageSearchItems(html, limit);
+    if (!items.length) throw new Error('No results parsed');
+    return items;
+  } catch (error) {
+    fallbackErrors.push(`startpage: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
     const readerUrl = `${READER_PROXY}https://www.google.com/search?gbv=1&q=${encodeURIComponent(query)}&hl=en&num=${Math.max(limit, 10)}&start=${normalizedOffset}`;
     const response = await fetchThroughLocalProxy(readerUrl, FETCH_SEARCH_TIMEOUT_MS, signal);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1676,7 +2409,23 @@ async function fetchGoogleSearchResults(
     });
     if (!items.length) throw new Error('No results parsed');
     return items;
+  } catch (error) {
+    fallbackErrors.push(`google reader: ${error instanceof Error ? error.message : String(error)}`);
   }
+
+  try {
+    return await fetchDuckDuckGoSearchResults(query, limit, signal, normalizedOffset);
+  } catch (error) {
+    fallbackErrors.push(`duckduckgo fallback: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    return await fetchBingSearchResults(query, limit, signal, normalizedOffset);
+  } catch (error) {
+    fallbackErrors.push(`bing fallback: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  throw new Error(fallbackErrors.join(' | ') || 'No results parsed');
 }
 
 async function fetchBingSearchResults(
@@ -1696,7 +2445,7 @@ async function fetchBingSearchResults(
   return items;
 }
 
-async function duckduckgoSearch(query: string, signal?: AbortSignal): Promise<FetchedContext> {
+export async function duckduckgoSearch(query: string, signal?: AbortSignal): Promise<FetchedContext> {
   const url = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
   const startedAt = nowMs();
   try {
@@ -1707,7 +2456,7 @@ async function duckduckgoSearch(query: string, signal?: AbortSignal): Promise<Fe
   }
 }
 
-async function duckduckgoInstant(query: string, signal?: AbortSignal): Promise<FetchedContext> {
+export async function duckduckgoInstant(query: string, signal?: AbortSignal): Promise<FetchedContext> {
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
   const startedAt = nowMs();
   try {
@@ -1747,7 +2496,7 @@ async function wikipediaSummary(title: string, signal?: AbortSignal): Promise<Fe
   }
 }
 
-async function wikipediaSearch(query: string, signal?: AbortSignal): Promise<FetchedContext> {
+export async function wikipediaSearch(query: string, signal?: AbortSignal): Promise<FetchedContext> {
   const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=3&format=json&origin=*`;
   try {
     const data = await fetchJsonDirect<Record<string, unknown>>(url, FETCH_DIRECT_JSON_TIMEOUT_MS, signal);
@@ -1885,7 +2634,7 @@ function getNewestSignalYear(context: FetchedContext): number | undefined {
   return years.length ? Math.max(...years) : undefined;
 }
 
-function getNewestSignalTimestamp(context: FetchedContext): number | null {
+export function getNewestSignalTimestamp(context: FetchedContext): number | null {
   const publishedAt = getPublishedTimestamp(context);
   if (publishedAt != null) return publishedAt;
 
@@ -2139,7 +2888,9 @@ function isSearchEngineHost(hostname: string): boolean {
     || hostname === 'bing.com'
     || hostname.endsWith('.bing.com')
     || hostname === 'duckduckgo.com'
-    || hostname.endsWith('.duckduckgo.com');
+    || hostname.endsWith('.duckduckgo.com')
+    || hostname === 'startpage.com'
+    || hostname.endsWith('.startpage.com');
 }
 
 function isSearchSummaryContext(context: FetchedContext): boolean {

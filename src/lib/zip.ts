@@ -11,7 +11,8 @@ export function downloadRegistryAsZip(registry: FileRegistry, zipName = 'project
   }
 
   const zipped = zipSync(files, { level: 6 });
-  const blob = new Blob([zipped], { type: 'application/zip' });
+  const zippedBytes = Uint8Array.from(zipped);
+  const blob = new Blob([zippedBytes], { type: 'application/zip' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

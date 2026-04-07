@@ -1,0 +1,4 @@
+interface:
+  display_name: "Overhaul"
+  short_description: "Rebuild a code section with a fresh architecture"
+  default_prompt: "Use $overhaul to replace this frontend or backend section with a materially different implementation that still achieves the same goal."

@@ -67,6 +67,10 @@ export function IconPlus(p: SVGProps) {
   return <Svg {...p}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></Svg>;
 }
 
+export function IconArrowUp(p: SVGProps) {
+  return <Svg {...p}><line x1="12" y1="19" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></Svg>;
+}
+
 export function IconFolderPlus(p: SVGProps) {
   return <Svg {...p}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></Svg>;
 }
@@ -154,6 +158,10 @@ export function IconTerminal(p: SVGProps) {
 
 export function IconSparkles(p: SVGProps) {
   return <Svg {...p}><path d="M12 3L9.5 9.5 3 12l6.5 2.5L12 21l2.5-6.5L21 12l-6.5-2.5L12 3z"/></Svg>;
+}
+
+export function IconHourglass(p: SVGProps) {
+  return <Svg {...p}><path d="M6 2h12"/><path d="M6 22h12"/><path d="M8 2v4a4 4 0 0 0 1.17 2.83L12 11.66l2.83-2.83A4 4 0 0 0 16 6V2"/><path d="M16 22v-4a4 4 0 0 0-1.17-2.83L12 12.34l-2.83 2.83A4 4 0 0 0 8 18v4"/></Svg>;
 }
 
 export function IconCode2(p: SVGProps) {

@@ -1,6 +1,5 @@
 // FILE: src/components/ChecklistIndicator.tsx
-import React from 'react';
-import { IconCheck, IconCode2, IconListChecks } from './Icon';
+import { IconCheck, IconListChecks } from './Icon';
 import type { DeepStep, RequestMode } from '../lib/deepPlanner';
 
 const MODE_LABELS: Record<RequestMode, string> = {

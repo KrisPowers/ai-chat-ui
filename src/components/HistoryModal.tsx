@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { ChatRecord } from '../types';
-import { IconX, IconMessageSquare, IconTrash2, IconMenu, IconUpload } from './Icon';
+import { IconX, IconMessageSquare, IconTrash2, IconUpload } from './Icon';
 
 interface Props {
   chats: ChatRecord[];

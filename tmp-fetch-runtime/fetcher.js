@@ -31,8 +31,29 @@ const GLOBAL_CONTEXT_BUDGET_STANDARD_MS = 15_000;
 const GLOBAL_CONTEXT_BUDGET_DEEP_MS = 24_000;
 const RECOVERY_CONTEXT_BUDGET_STANDARD_MS = 7_500;
 const RECOVERY_CONTEXT_BUDGET_DEEP_MS = 12_000;
+const SEARCH_ENGINE_DIAGNOSTIC_VERSION = '2026-04-07-operational-recovery-v6';
 const LOCAL_FETCH_PROXY_PATH = '/__fetch?url=';
 const READER_PROXY = 'https://r.jina.ai/http://';
+const SEARCH_ENGINE_DIAGNOSTIC_CASES = [
+    {
+        name: 'Encyclopedic fact probe',
+        query: '"Albert Einstein" theoretical physicist',
+        expectedEvidence: 'a readable page that identifies Albert Einstein as a physicist',
+        expectedMatchGroups: [
+            ['albert einstein'],
+            ['theoretical physicist', 'physicist'],
+        ],
+    },
+    {
+        name: 'Example domain probe',
+        query: '"Example Domain" illustrative examples',
+        expectedEvidence: 'a readable page that describes Example Domain as being for illustrative examples',
+        expectedMatchGroups: [
+            ['example domain'],
+            ['illustrative examples', 'illustrative example'],
+        ],
+    },
+];
 const WORLD_NEWS_DOMAINS = [
     'reuters.com',
     'apnews.com',
@@ -657,6 +678,20 @@ function buildCompactQuery(analysis) {
         ...analysis.years.slice(-1).map(String),
     ]);
     return compactTerms.join(' ').slice(0, 140) || analysis.contextTerm || analysis.primaryTerm;
+}
+function buildExactSearchQueries(currentMessage) {
+    const raw = normalizeWhitespace(stripPromptUrls(currentMessage)).trim();
+    if (!raw || CASUAL_QUERY_RE.test(raw) || buildSearchTerms(raw).length < 2) {
+        return [];
+    }
+    const exact = raw.slice(0, 220);
+    const cleanedExact = stripSearchFiller(exact).slice(0, 220);
+    const quotedExact = exact.replace(/"/g, '').trim();
+    return uniqueStrings([
+        exact,
+        cleanedExact && cleanedExact !== exact ? cleanedExact : '',
+        quotedExact.split(/\s+/).length >= 4 ? `"${quotedExact}"` : '',
+    ]).filter(Boolean);
 }
 function buildQueryVariants(analysis) {
     const base = uniqueStrings([
@@ -1284,6 +1319,549 @@ async function scrapeSearchResultItems(items, options, signal) {
         minTextLength: options.minTextLength ?? 120,
     }, signal)));
     return results.filter((context) => !context.error && context.text.trim().length >= (options.minTextLength ?? 120));
+}
+function matchesSearchEngineDiagnosticCase(context, testCase) {
+    const haystack = normalizeWhitespace([
+        context.title,
+        context.url,
+        context.text,
+    ].filter(Boolean).join(' ')).toLowerCase();
+    return testCase.expectedMatchGroups.every((group) => group.some((candidate) => haystack.includes(candidate.toLowerCase())));
+}
+function formatDiagnosticTitles(contexts) {
+    const titles = contexts
+        .slice(0, 3)
+        .map((context) => normalizeWhitespace(context.title))
+        .filter(Boolean);
+    return titles.length ? titles.join(' | ') : 'No scraped page titles captured.';
+}
+function countPotentialHtmlResultLinks(html, decodeUrl) {
+    const links = new Set();
+    for (const match of html.matchAll(/<a\b[^>]+href="([^"]+)"/gi)) {
+        const resolvedUrl = decodeUrl(match[1] ?? '');
+        const hostname = extractHostname(resolvedUrl);
+        if (!resolvedUrl.startsWith('http'))
+            continue;
+        if (!hostname || isSearchEngineHost(hostname))
+            continue;
+        links.add(resolvedUrl);
+    }
+    return links.size;
+}
+function countPotentialReaderResultLinks(text, decodeUrl) {
+    const links = new Set();
+    for (const match of text.matchAll(/\[[^\]]+]\((https?:\/\/[^\s)]+)\)/g)) {
+        const resolvedUrl = decodeUrl(match[1] ?? '');
+        const hostname = extractHostname(resolvedUrl);
+        if (!resolvedUrl.startsWith('http'))
+            continue;
+        if (!hostname || isSearchEngineHost(hostname))
+            continue;
+        links.add(resolvedUrl);
+    }
+    return links.size;
+}
+function readDiagnosticProxyError(body) {
+    const trimmed = body.trim();
+    if (!trimmed.startsWith('{'))
+        return null;
+    try {
+        const parsed = JSON.parse(trimmed);
+        return typeof parsed.error === 'string' ? parsed.error.trim() : null;
+    }
+    catch {
+        return null;
+    }
+}
+function detectSearchBlockReason(engine, body) {
+    const lower = body.toLowerCase();
+    if (engine === 'google' && isBlockedGoogleSearchContent(body)) {
+        return 'Google returned an anti-bot or JavaScript challenge instead of normal result markup.';
+    }
+    if (lower.includes('captcha')
+        || lower.includes('verify you are human')
+        || lower.includes('human verification')
+        || lower.includes('unusual traffic')
+        || lower.includes('access denied')
+        || lower.includes('temporarily blocked')
+        || lower.includes('automated queries')) {
+        return 'The search engine returned a bot-detection or access-control page.';
+    }
+    if (lower.includes('please enable javascript') || lower.includes('javascript is required')) {
+        return 'The search engine returned a JavaScript-required page instead of directly parseable results.';
+    }
+    return null;
+}
+function hasSearchNoResultsSignal(body) {
+    const lower = body.toLowerCase();
+    return lower.includes('did not match any documents')
+        || lower.includes('no results found')
+        || lower.includes('no results')
+        || lower.includes('there are no results')
+        || lower.includes('no more results');
+}
+function describeSearchAttemptSource(source) {
+    return source === 'direct-html' ? 'Direct HTML search fetch' : 'Reader fallback fetch';
+}
+async function runDiagnosticSearchAttempt(engine, query, source) {
+    const limit = 8;
+    const searchUrl = source === 'direct-html'
+        ? engine === 'duckduckgo'
+            ? `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&s=0&dc=1`
+            : `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&num=${Math.max(limit, 10)}&start=0`
+        : engine === 'duckduckgo'
+            ? `${READER_PROXY}https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`
+            : `${READER_PROXY}https://www.google.com/search?gbv=1&q=${encodeURIComponent(query)}&hl=en&num=${Math.max(limit, 10)}&start=0`;
+    const decodeUrl = engine === 'duckduckgo' ? decodeDuckDuckGoResultUrl : decodeGoogleResultUrl;
+    const parseItems = source === 'direct-html'
+        ? (body) => (engine === 'duckduckgo' ? parseDuckDuckGoSearchItems(body, limit) : parseGoogleSearchItems(body, limit))
+        : (body) => parseReaderSearchItems(body, { decodeUrl, limit });
+    const countPotentialLinks = source === 'direct-html'
+        ? (body) => countPotentialHtmlResultLinks(body, decodeUrl)
+        : (body) => countPotentialReaderResultLinks(body, decodeUrl);
+    try {
+        const response = await fetchThroughLocalProxy(searchUrl, FETCH_SEARCH_TIMEOUT_MS);
+        const body = await response.text();
+        const bodyLength = body.length;
+        if (!response.ok) {
+            const proxyError = readDiagnosticProxyError(body);
+            return {
+                source,
+                status: 'fail',
+                url: searchUrl,
+                httpStatus: response.status,
+                bodyLength,
+                parsedCount: 0,
+                potentialLinkCount: 0,
+                causeCode: 'http-error',
+                detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}${proxyError ? `: ${proxyError}` : '.'}`,
+                items: [],
+            };
+        }
+        if (!body.trim()) {
+            return {
+                source,
+                status: 'fail',
+                url: searchUrl,
+                httpStatus: response.status,
+                bodyLength,
+                parsedCount: 0,
+                potentialLinkCount: 0,
+                causeCode: 'empty-body',
+                detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}, but the response body was empty.`,
+                items: [],
+            };
+        }
+        const items = parseItems(body);
+        const potentialLinkCount = countPotentialLinks(body);
+        if (items.length > 0) {
+            return {
+                source,
+                status: 'pass',
+                url: searchUrl,
+                httpStatus: response.status,
+                bodyLength,
+                parsedCount: items.length,
+                potentialLinkCount,
+                causeCode: 'unknown',
+                detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status} and parsed ${items.length} result link${items.length === 1 ? '' : 's'}.`,
+                items,
+            };
+        }
+        const blockedReason = detectSearchBlockReason(engine, body);
+        if (blockedReason) {
+            return {
+                source,
+                status: 'fail',
+                url: searchUrl,
+                httpStatus: response.status,
+                bodyLength,
+                parsedCount: 0,
+                potentialLinkCount,
+                causeCode: 'blocked',
+                detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}, but ${blockedReason}`,
+                items: [],
+            };
+        }
+        if (hasSearchNoResultsSignal(body)) {
+            return {
+                source,
+                status: 'fail',
+                url: searchUrl,
+                httpStatus: response.status,
+                bodyLength,
+                parsedCount: 0,
+                potentialLinkCount,
+                causeCode: 'no-results',
+                detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status}, but the page reported no results for the probe query.`,
+                items: [],
+            };
+        }
+        if (potentialLinkCount > 0) {
+            return {
+                source,
+                status: 'fail',
+                url: searchUrl,
+                httpStatus: response.status,
+                bodyLength,
+                parsedCount: 0,
+                potentialLinkCount,
+                causeCode: 'parser-mismatch',
+                detail: `${describeSearchAttemptSource(source)} returned HTTP ${response.status} and exposed ${potentialLinkCount} potential outbound link${potentialLinkCount === 1 ? '' : 's'}, but the parser extracted 0 results. This usually means the search-result markup changed and the parser no longer matches it.`,
+                items: [],
+            };
+        }
+        return {
+            source,
+            status: 'fail',
+            url: searchUrl,
+            httpStatus: response.status,
+            bodyLength,
+            parsedCount: 0,
+            potentialLinkCount,
+            causeCode: bodyLength < 500 ? 'short-body' : 'unknown',
+            detail: bodyLength < 500
+                ? `${describeSearchAttemptSource(source)} returned an unusually short HTTP ${response.status} response (${bodyLength} characters) with no parseable result links.`
+                : `${describeSearchAttemptSource(source)} returned a non-empty HTTP ${response.status} response (${bodyLength} characters), but no result links could be parsed and no clear block/no-results signal was detected.`,
+            items: [],
+        };
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+            source,
+            status: 'fail',
+            url: searchUrl,
+            parsedCount: 0,
+            bodyLength: 0,
+            potentialLinkCount: 0,
+            causeCode: message.includes('Local fetch proxy unavailable') ? 'proxy-unavailable' : 'http-error',
+            detail: `${describeSearchAttemptSource(source)} failed before parsing: ${message}`,
+            items: [],
+        };
+    }
+}
+function summarizeSearchAttemptFailure(attempts) {
+    const evidence = attempts.map((attempt) => attempt.detail);
+    const causeCodes = attempts.map((attempt) => attempt.causeCode);
+    if (causeCodes.includes('proxy-unavailable')) {
+        return {
+            rootCause: 'The app session was not connected to a working local /__fetch proxy, so the diagnostic could not reliably reach the search engine.',
+            evidence,
+        };
+    }
+    if (causeCodes.includes('blocked')) {
+        return {
+            rootCause: 'The search engine returned a bot-detection, JavaScript challenge, or other access-control page instead of normal results.',
+            evidence,
+        };
+    }
+    if (causeCodes.every((code) => code === 'parser-mismatch')) {
+        return {
+            rootCause: 'The search response format appears to have changed and no longer matches the parser.',
+            evidence,
+        };
+    }
+    if (causeCodes.every((code) => code === 'no-results')) {
+        return {
+            rootCause: 'The probe query unexpectedly returned no search results, so scraping never started.',
+            evidence,
+        };
+    }
+    if (causeCodes.includes('http-error')) {
+        return {
+            rootCause: 'The search request failed before parsing because the upstream response returned an HTTP or proxy-level error.',
+            evidence,
+        };
+    }
+    if (causeCodes.includes('empty-body') || causeCodes.includes('short-body')) {
+        return {
+            rootCause: 'The search engine responded, but the body was empty or too thin to contain parseable results.',
+            evidence,
+        };
+    }
+    return {
+        rootCause: 'The search engine responded, but the diagnostic could not extract parseable result links.',
+        evidence,
+    };
+}
+async function fetchSearchResultsWithDiagnostic(engine, query) {
+    const directAttempt = await runDiagnosticSearchAttempt(engine, query, 'direct-html');
+    if (directAttempt.status === 'pass') {
+        return {
+            items: directAttempt.items,
+            evidence: [directAttempt.detail],
+        };
+    }
+    if (directAttempt.causeCode === 'proxy-unavailable') {
+        const failure = summarizeSearchAttemptFailure([directAttempt]);
+        return {
+            items: [],
+            rootCause: failure.rootCause,
+            evidence: failure.evidence,
+        };
+    }
+    const readerAttempt = await runDiagnosticSearchAttempt(engine, query, 'reader-fallback');
+    if (readerAttempt.status === 'pass') {
+        return {
+            items: readerAttempt.items,
+            evidence: [directAttempt.detail, readerAttempt.detail],
+        };
+    }
+    const failure = summarizeSearchAttemptFailure([directAttempt, readerAttempt]);
+    try {
+        const recoveredItems = await (engine === 'duckduckgo'
+            ? fetchDuckDuckGoSearchResults(query, 8)
+            : fetchGoogleSearchResults(query, 8));
+        if (recoveredItems.length > 0) {
+            return {
+                items: recoveredItems,
+                evidence: [
+                    ...failure.evidence,
+                    engine === 'google'
+                        ? `Operational Google fetch chain recovered ${recoveredItems.length} result link${recoveredItems.length === 1 ? '' : 's'} via the production fallback path after the Google-only diagnostic probes failed.`
+                        : `Operational DuckDuckGo fetch chain recovered ${recoveredItems.length} result link${recoveredItems.length === 1 ? '' : 's'} via the production fetch path after the diagnostic probes failed.`,
+                ],
+            };
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failure.evidence.push(`Operational recovery chain failed after the diagnostic probes: ${message}`);
+    }
+    return {
+        items: [],
+        rootCause: failure.rootCause,
+        evidence: failure.evidence,
+    };
+}
+function summarizeScrapeFailure(contexts) {
+    const evidence = contexts.map((context) => {
+        const hostname = extractHostname(context.url) || context.url;
+        return context.error
+            ? `${hostname}: ${context.error}`
+            : `${hostname}: only ${context.text.trim().length} characters of readable text were extracted, which is below the verification threshold.`;
+    });
+    if (contexts.every((context) => context.error?.includes('Local fetch proxy unavailable'))) {
+        return {
+            rootCause: 'Destination-page scraping failed because the local /__fetch proxy was unavailable while opening result pages.',
+            evidence,
+        };
+    }
+    if (contexts.every((context) => context.error?.includes('Insufficient page text'))) {
+        return {
+            rootCause: 'The result pages loaded, but they did not expose enough readable text to verify content. This usually points to JS-heavy pages, gated pages, or extraction rules that are too strict.',
+            evidence,
+        };
+    }
+    if (contexts.every((context) => context.error)) {
+        return {
+            rootCause: 'Every sampled destination page failed during scraping before enough readable text could be extracted.',
+            evidence,
+        };
+    }
+    return {
+        rootCause: 'Search results were parsed, but the linked pages did not yield enough readable content for verification.',
+        evidence,
+    };
+}
+async function runSearchEngineDiagnosticProbe(engine) {
+    const startedAt = nowMs();
+    const label = engine === 'duckduckgo' ? 'DuckDuckGo' : 'Google Search';
+    const caseFailures = [];
+    let bestSearchResultCount = 0;
+    let bestScrapedPageCount = 0;
+    for (const testCase of SEARCH_ENGINE_DIAGNOSTIC_CASES) {
+        const searchFetch = await fetchSearchResultsWithDiagnostic(engine, testCase.query);
+        const items = mergeSearchResultItems(searchFetch.items, 8);
+        bestSearchResultCount = Math.max(bestSearchResultCount, items.length);
+        if (!items.length) {
+            caseFailures.push({
+                caseName: testCase.name,
+                rootCause: searchFetch.rootCause ?? 'The diagnostic could not fetch and parse any search results.',
+                evidence: searchFetch.evidence,
+            });
+            continue;
+        }
+        const scrapeCandidates = items
+            .filter((item) => isScrapableSearchResult(item.url))
+            .slice(0, 3);
+        if (!scrapeCandidates.length) {
+            caseFailures.push({
+                caseName: testCase.name,
+                rootCause: 'Search results were parsed, but none of the returned links were usable destination pages for scraping.',
+                evidence: [
+                    ...searchFetch.evidence,
+                    `Parsed results only exposed search-engine or unsupported links. Top result URLs: ${items.slice(0, 3).map((item) => item.url).join(' | ') || 'none'}.`,
+                ],
+            });
+            continue;
+        }
+        const inspectedPages = await Promise.all(scrapeCandidates.map((item) => fetchReadablePage(item.url, {
+            provider: extractHostname(item.url) || label,
+            sourceType: 'search',
+            credibility: 'search',
+            title: item.title,
+            publishedAt: item.publishedAt,
+            timeoutMs: FETCH_SEARCH_SCRAPE_TIMEOUT_MS,
+            minTextLength: 140,
+        })));
+        const scraped = inspectedPages.filter((context) => !context.error && context.text.trim().length >= 140);
+        bestScrapedPageCount = Math.max(bestScrapedPageCount, scraped.length);
+        if (!scraped.length) {
+            const scrapeFailure = summarizeScrapeFailure(inspectedPages);
+            caseFailures.push({
+                caseName: testCase.name,
+                rootCause: scrapeFailure.rootCause,
+                evidence: [...searchFetch.evidence, ...scrapeFailure.evidence],
+            });
+            continue;
+        }
+        const verified = scraped.find((context) => matchesSearchEngineDiagnosticCase(context, testCase));
+        if (verified) {
+            return {
+                engine,
+                label,
+                status: 'pass',
+                caseName: testCase.name,
+                query: testCase.query,
+                expectedEvidence: testCase.expectedEvidence,
+                durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+                searchResultCount: items.length,
+                scrapedPageCount: scraped.length,
+                verifiedUrl: verified.url,
+                verifiedTitle: verified.title,
+                reasoning: `${searchFetch.evidence.join(' ')} Scraped ${scraped.length} destination page${scraped.length === 1 ? '' : 's'} and verified ${testCase.expectedEvidence}.`,
+            };
+        }
+        caseFailures.push({
+            caseName: testCase.name,
+            rootCause: 'Search fetching and scraping both worked, but the scraped pages did not contain the expected verification evidence.',
+            evidence: [
+                ...searchFetch.evidence,
+                `Scraped ${scraped.length} readable page${scraped.length === 1 ? '' : 's'}, but none contained ${testCase.expectedEvidence}. Top scraped titles: ${formatDiagnosticTitles(scraped)}.`,
+            ],
+        });
+    }
+    const fallbackCase = SEARCH_ENGINE_DIAGNOSTIC_CASES[0];
+    const rootCause = caseFailures.length === 1
+        ? caseFailures[0].rootCause
+        : caseFailures.length > 1 && caseFailures.every((failure) => failure.rootCause === caseFailures[0].rootCause)
+            ? caseFailures[0].rootCause
+            : 'All probe cases failed, but not for the same reason. Review the per-case evidence below for the exact break point in each run.';
+    const reasoning = caseFailures.length
+        ? caseFailures.map((failure) => `${failure.caseName}: Root cause: ${failure.rootCause} Evidence: ${failure.evidence.join(' ')}`).join(' ')
+        : 'All verification probes failed without returning a usable diagnostic trail.';
+    return {
+        engine,
+        label,
+        status: 'fail',
+        caseName: fallbackCase.name,
+        query: fallbackCase.query,
+        expectedEvidence: fallbackCase.expectedEvidence,
+        durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+        searchResultCount: bestSearchResultCount,
+        scrapedPageCount: bestScrapedPageCount,
+        rootCause,
+        reasoning,
+    };
+}
+function buildDeepResearchSearchEngineReport(result) {
+    const lines = [
+        '# Deep Research Search Engine Test Report',
+        '',
+        'Use this file as-is when reporting a failed search-engine diagnostic to developers or when asking Codex/ChatGPT to help debug the fetch pipeline.',
+        'Attach or paste the full file so the exact engine-level reasoning is preserved.',
+        '',
+        '## Overview',
+        '',
+        `- Diagnostic version: ${SEARCH_ENGINE_DIAGNOSTIC_VERSION}`,
+        `- Status: ${result.status.toUpperCase()}`,
+        `- Started: ${result.startedAt}`,
+        `- Completed: ${result.completedAt}`,
+        `- Duration: ${result.durationMs}ms`,
+        '',
+        '## Summary',
+        '',
+        result.summary,
+        '',
+        '## Reasoning',
+        '',
+        result.reasoning || 'No additional reasoning captured.',
+        '',
+        '## Engine Results',
+        '',
+        ...result.probes.flatMap((probe) => [
+            `### ${probe.label}`,
+            '',
+            `- Status: ${probe.status.toUpperCase()}`,
+            `- Duration: ${probe.durationMs}ms`,
+            `- Probe: ${probe.caseName}`,
+            `- Query: ${probe.query}`,
+            `- Expected evidence: ${probe.expectedEvidence}`,
+            `- Search results parsed: ${probe.searchResultCount}`,
+            `- Destination pages scraped: ${probe.scrapedPageCount}`,
+            probe.verifiedUrl ? `- Verified URL: ${probe.verifiedUrl}` : '',
+            probe.verifiedTitle ? `- Verified title: ${probe.verifiedTitle}` : '',
+            probe.rootCause ? `- Root cause: ${probe.rootCause}` : '',
+            `- Reasoning: ${probe.reasoning}`,
+            '',
+        ]).filter(Boolean),
+    ];
+    if (!result.probes.length) {
+        lines.push('No per-engine probe results were captured.');
+        lines.push('');
+    }
+    lines.push('## Developer Request');
+    lines.push('');
+    lines.push('Please inspect the deep-research fetch path for DuckDuckGo and Google Search, including search-result fetching, parsing, destination-page scraping, and verification logic.');
+    lines.push('');
+    return lines.join('\n').trim();
+}
+export async function runDeepResearchSearchEngineTest() {
+    const startedAtIso = new Date().toISOString();
+    const startedAt = nowMs();
+    try {
+        const probes = [];
+        for (const engine of ['duckduckgo', 'google']) {
+            probes.push(await runSearchEngineDiagnosticProbe(engine));
+        }
+        const failedLabels = probes.filter((probe) => probe.status === 'fail').map((probe) => probe.label);
+        const status = failedLabels.length ? 'fail' : 'pass';
+        const summary = status === 'pass'
+            ? 'DuckDuckGo and Google Search both passed the deep research fetch diagnostic.'
+            : `${failedLabels.join(' and ')} failed the deep research fetch diagnostic.`;
+        const reasoning = status === 'pass'
+            ? probes.map((probe) => `${probe.label}: ${probe.reasoning}`).join(' ')
+            : probes.filter((probe) => probe.status === 'fail').map((probe) => `${probe.label}: ${probe.reasoning}`).join(' ');
+        const result = {
+            status,
+            startedAt: startedAtIso,
+            completedAt: new Date().toISOString(),
+            durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+            summary,
+            reasoning,
+            reportText: '',
+            probes,
+        };
+        result.reportText = buildDeepResearchSearchEngineReport(result);
+        return result;
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const result = {
+            status: 'fail',
+            startedAt: startedAtIso,
+            completedAt: new Date().toISOString(),
+            durationMs: Math.max(0, Math.round(nowMs() - startedAt)),
+            summary: 'The deep research fetch diagnostic crashed before both search engines could be checked.',
+            reasoning: message,
+            reportText: '',
+            probes: [],
+        };
+        result.reportText = buildDeepResearchSearchEngineReport(result);
+        return result;
+    }
 }
 async function collectDestinationContextsFromItems(items, options, signal) {
     if (!items.length)
@@ -2346,7 +2924,7 @@ function ensureMinimumSourceCount(selected, contexts, analysis, options = {}) {
     }
     return supplemented;
 }
-async function recoverMinimumContexts(analysis, queryVariants, options) {
+async function recoverMinimumContexts(analysis, queryVariants, exactQueries, options) {
     const minimumRequired = minimumRequiredSourceCount(analysis, options);
     if (minimumRequired <= 0)
         return [];
@@ -2354,7 +2932,10 @@ async function recoverMinimumContexts(analysis, queryVariants, options) {
     const searchFallbackSourceType = analysis.prefersNewsSources ? 'news' : analysis.prefersOfficialSources ? 'official' : 'search';
     const searchFallbackCredibility = analysis.prefersNewsSources ? 'major-news' : analysis.prefersOfficialSources ? 'official' : 'search';
     const variantLimit = isDeep ? Math.min(queryVariants.length, 3) : Math.min(queryVariants.length, 2);
-    const variants = queryVariants.slice(0, Math.max(1, variantLimit));
+    const variants = uniqueStrings([
+        ...exactQueries,
+        ...queryVariants,
+    ]).slice(0, Math.max(1, variantLimit + exactQueries.length));
     const recoveryBudget = isDeep ? RECOVERY_CONTEXT_BUDGET_DEEP_MS : RECOVERY_CONTEXT_BUDGET_STANDARD_MS;
     const recoverySearchPageCount = isDeep ? 2 : 1;
     const recoveryDestinationPageLimit = isDeep ? 4 : 3;
@@ -2441,6 +3022,7 @@ export async function fetchGlobalContext(userMessage, conversationHistory = [], 
     if ((!analysis.shouldFetch && !options.forceFetch) || (!analysis.primaryTerm && !analysis.contextTerm))
         return [];
     const compactQuery = buildCompactQuery(analysis);
+    const exactSearchQueries = buildExactSearchQueries(userMessage);
     const queryVariants = buildQueryVariants(analysis);
     const primarySearchQuery = queryVariants[0] ?? compactQuery;
     const desiredSourceCount = resolveDesiredSourceCount(analysis, options);
@@ -2460,6 +3042,7 @@ export async function fetchGlobalContext(userMessage, conversationHistory = [], 
         ? `${compactQuery} latest status timeline`
         : compactQuery;
     const engineQueries = uniqueStrings([
+        ...exactSearchQueries,
         primarySearchQuery,
         ...(needsTimelySources ? [timelyQuery] : []),
         ...queryVariants.slice(1, searchVariantLimit),
@@ -2530,7 +3113,7 @@ export async function fetchGlobalContext(userMessage, conversationHistory = [], 
     }
     let recoveredResults = [];
     if (minimumRequired > 0) {
-        const recoveryResults = await recoverMinimumContexts(analysis, queryVariants, options);
+        const recoveryResults = await recoverMinimumContexts(analysis, queryVariants, exactSearchQueries, options);
         recoveredResults = recoveryResults;
         if (recoveryResults.length) {
             selected = ensureMinimumSourceCount(selectBestContexts([...results, ...recoveryResults], analysis, options), [...results, ...recoveryResults], analysis, options);

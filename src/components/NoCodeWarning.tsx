@@ -1,5 +1,5 @@
 // FILE: src/components/NoCodeWarning.tsx
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { IconX } from './Icon';
 
 interface Props {

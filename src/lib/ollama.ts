@@ -18,6 +18,49 @@ const PROVIDER_LABELS: Record<ModelProvider, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic',
 };
+const MODEL_TOKEN_ALIASES: Record<string, string> = {
+  chatgpt: 'ChatGPT',
+  claude: 'Claude',
+  coder: 'Coder',
+  deepseek: 'DeepSeek',
+  flash: 'Flash',
+  gemma: 'Gemma',
+  gpt: 'GPT',
+  haiku: 'Haiku',
+  llama: 'Llama',
+  max: 'Max',
+  mini: 'Mini',
+  mistral: 'Mistral',
+  mixtral: 'Mixtral',
+  nano: 'Nano',
+  nemo: 'Nemo',
+  opus: 'Opus',
+  phi: 'Phi',
+  pro: 'Pro',
+  qwen: 'Qwen',
+  reasoning: 'Reasoning',
+  rtx: 'RTX',
+  sonnet: 'Sonnet',
+  turbo: 'Turbo',
+  ultra: 'Ultra',
+};
+const OLLAMA_STOP_TOKENS = new Set([
+  'base',
+  'chat',
+  'fp16',
+  'fp32',
+  'gguf',
+  'instruct',
+  'it',
+  'latest',
+  'preview',
+  'reasoning',
+  'text',
+  'thinking',
+  'tool',
+  'tools',
+  'vision',
+]);
 const OPENAI_UI_SAMPLE_MODELS = [
   'gpt-5.4',
   'gpt-5.4-mini',
@@ -221,9 +264,105 @@ export function getModelProviderLabel(handle?: string | null): string {
   return PROVIDER_LABELS[getModelProvider(handle)];
 }
 
+function formatOpenAIModelName(modelId: string): string | null {
+  const clean = modelId.trim().toLowerCase();
+  if (!clean) return null;
+
+  const gptMatch = clean.match(/^gpt-(4o|4\.1|5(?:\.\d+)?)(?:-(mini|nano))?$/i);
+  if (gptMatch) {
+    const family = gptMatch[1].startsWith('5') ? '5' : gptMatch[1];
+    const variant = gptMatch[2] ? ` ${MODEL_TOKEN_ALIASES[gptMatch[2]] ?? gptMatch[2]}` : '';
+    return `GPT-${family}${variant}`;
+  }
+
+  const reasoningMatch = clean.match(/^(o\d)(?:-(mini|pro))?$/i);
+  if (reasoningMatch) {
+    const variant = reasoningMatch[2] ? ` ${MODEL_TOKEN_ALIASES[reasoningMatch[2]] ?? reasoningMatch[2]}` : '';
+    return `${reasoningMatch[1]}${variant}`;
+  }
+
+  return null;
+}
+
+function formatAnthropicModelName(modelId: string): string | null {
+  const clean = modelId.trim().toLowerCase();
+  if (!clean.startsWith('claude')) return null;
+
+  let match = clean.match(/^claude-(opus|sonnet|haiku)-(\d)(?:-(\d))?(?:-\d+)?$/i);
+  if (match) {
+    const family = MODEL_TOKEN_ALIASES[match[1]] ?? match[1];
+    const version = match[3] ? `${match[2]}.${match[3]}` : match[2];
+    return `Claude ${family} ${version}`;
+  }
+
+  match = clean.match(/^claude-(\d)(?:-(\d))?-(sonnet|haiku)(?:-\d+)?$/i);
+  if (match) {
+    const family = MODEL_TOKEN_ALIASES[match[3]] ?? match[3];
+    const version = match[2] ? `${match[1]}.${match[2]}` : match[1];
+    return `Claude ${family} ${version}`;
+  }
+
+  return 'Claude';
+}
+
+function normalizeModelToken(token: string): string[] {
+  const clean = token.trim().toLowerCase();
+  if (!clean) return [];
+
+  return clean
+    .replace(/([a-z])(\d)/gi, '$1 $2')
+    .replace(/(\d)([a-z])/gi, '$1 $2')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function isQuantizationToken(token: string): boolean {
+  return /^(q\d|iq\d|f16|fp16|fp32|gguf|k|km|m|s|xs)$/i.test(token);
+}
+
+function formatGenericToken(token: string): string {
+  const clean = token.trim().toLowerCase();
+  if (!clean) return '';
+  if (MODEL_TOKEN_ALIASES[clean]) return MODEL_TOKEN_ALIASES[clean];
+  if (/^\d+(?:\.\d+)?$/.test(clean)) return clean;
+  if (/^\d+b$/i.test(clean)) return `${clean.slice(0, -1)}B`;
+  if (/^r\d+$/i.test(clean)) return `R${clean.slice(1)}`;
+  if (/^v\d+$/i.test(clean)) return `V${clean.slice(1)}`;
+  if (/^[a-z]\d+$/i.test(clean)) return clean[0].toUpperCase() + clean.slice(1);
+  return clean.charAt(0).toUpperCase() + clean.slice(1);
+}
+
+function formatOllamaModelName(modelId: string): string {
+  const [base, tag] = modelId.trim().split(':', 2);
+  const rawTokens = [
+    ...base.replace(/[._/]+/g, ' ').split(/[\s-]+/),
+    ...(tag && tag.toLowerCase() !== 'latest' ? tag.replace(/[._/]+/g, ' ').split(/[\s-]+/) : []),
+  ].flatMap((token) => normalizeModelToken(token));
+
+  const filtered = rawTokens.filter((token) => {
+    if (!token) return false;
+    if (OLLAMA_STOP_TOKENS.has(token)) return false;
+    if (isQuantizationToken(token)) return false;
+    return true;
+  });
+
+  const formatted = filtered.map((token) => formatGenericToken(token)).filter(Boolean);
+  return formatted.join(' ').trim() || modelId || 'No model detected';
+}
+
 export function getModelDisplayName(handle?: string | null): string {
-  const { modelId } = parseModelHandle(handle);
-  return modelId || 'No model detected';
+  const { provider, modelId } = parseModelHandle(handle);
+  if (!modelId) return 'No model detected';
+
+  if (provider === 'openai') {
+    return formatOpenAIModelName(modelId) ?? modelId;
+  }
+
+  if (provider === 'anthropic') {
+    return formatAnthropicModelName(modelId) ?? modelId;
+  }
+
+  return formatOllamaModelName(modelId);
 }
 
 export function getModelDisplayLabel(handle?: string | null): string {

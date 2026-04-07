@@ -8,6 +8,8 @@ import { useDB } from './hooks/useDB';
 import { useReplyPreferences } from './hooks/useReplyPreferences';
 import { useToast } from './hooks/useToast';
 import { createRegistry, updateRegistry } from './lib/fileRegistry';
+import { mergeStoredFileEntries } from './lib/chatAttachments';
+import { runDeepResearchSearchEngineTest } from './lib/fetcher';
 import {
   ANTHROPIC_UI_SAMPLE_KEY,
   DEFAULT_OLLAMA_BASE,
@@ -24,10 +26,11 @@ import {
 } from './lib/ollama';
 import { DEFAULT_PRESET_ID } from './lib/presets';
 import { REPLY_PREFERENCES_STORAGE_KEY } from './lib/replyPreferences';
-import { IconFolderPlus, IconHexagon, IconMessageSquare, IconSettings, IconTerminal, IconTrash2, IconUpload, IconX } from './components/Icon';
+import { IconCheck, IconDownload, IconFolderPlus, IconHexagon, IconMessageSquare, IconRefreshCw, IconSearch, IconSettings, IconTerminal, IconTrash2, IconUpload, IconX } from './components/Icon';
 import { deriveWorkspaceFromChat, normaliseProjectId } from './lib/workspaces';
 import type { ChatReasoningEffort, Panel, ChatRecord, ProjectFolder, ThreadType } from './types';
 import type { FileRegistry } from './lib/fileRegistry';
+import type { DeepResearchSearchEngineTestResult } from './lib/fetcher';
 
 const FOLDERS_STORAGE_KEY = 'larry_project_folders_v1';
 const DEFAULT_MODEL_STORAGE_KEY = 'larry_default_model_v1';
@@ -134,6 +137,35 @@ function formatStoragePercent(percent: number): string {
   if (percent < 0.1) return '0.1%';
   const rounded = roundUp(percent, percent < 10 ? 1 : 0);
   return `${rounded.toFixed(percent < 10 ? 1 : 0)}%`;
+}
+
+function formatDiagnosticDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms / 1000)}s`;
+}
+
+function formatDiagnosticTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return value;
+  return timestamp.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function formatDiagnosticFilenameTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return 'report';
+
+  const year = timestamp.getFullYear();
+  const month = String(timestamp.getMonth() + 1).padStart(2, '0');
+  const day = String(timestamp.getDate()).padStart(2, '0');
+  const hours = String(timestamp.getHours()).padStart(2, '0');
+  const minutes = String(timestamp.getMinutes()).padStart(2, '0');
+  const seconds = String(timestamp.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
 }
 
 function buildStorageVisualSegments<T extends { bytes: number }>(buckets: T[]) {
@@ -388,6 +420,8 @@ export default function App() {
   const [defaultModel, setDefaultModel] = useState('');
   const [developerToolsEnabled, setDeveloperToolsEnabled] = useState(false);
   const [advancedUseEnabled, setAdvancedUseEnabled] = useState(false);
+  const [deepResearchSearchTestResult, setDeepResearchSearchTestResult] = useState<DeepResearchSearchEngineTestResult | null>(null);
+  const [deepResearchSearchTestRunning, setDeepResearchSearchTestRunning] = useState(false);
   const [browserStorage, setBrowserStorage] = useState<BrowserStorageSnapshot>({
     supported: true,
   });
@@ -1034,10 +1068,12 @@ export default function App() {
     model?: string;
     reasoningEffort?: ChatReasoningEffort;
     workspace?: { id: string; label: string };
+    fileEntries?: ChatRecord['fileEntries'];
   }) => {
     const workspaceEntries = options.workspace
       ? cloneFileEntries(projectFolders.find((folder) => folder.id === options.workspace?.id)?.fileEntries)
       : [];
+    const launchFileEntries = mergeStoredFileEntries(workspaceEntries, cloneFileEntries(options.fileEntries));
 
     if (options.workspace) {
       upsertProjectFolder({ id: options.workspace.id, label: options.workspace.label });
@@ -1063,7 +1099,7 @@ export default function App() {
         threadType: options.threadType,
         projectId: options.workspace?.id,
         projectLabel: options.workspace?.label,
-        fileRegistry: registryFromEntries(workspaceEntries),
+        fileRegistry: registryFromEntries(launchFileEntries),
       };
 
       setPanels((prev) => prev.map((panel) => panel.id === starterHostPanel.id
@@ -1090,7 +1126,7 @@ export default function App() {
         projectLabel: updatedStarterPanel.projectLabel,
         messages: updatedStarterPanel.messages,
         updatedAt: Date.now(),
-        fileEntries: workspaceEntries,
+        fileEntries: launchFileEntries,
       });
       setQueuedLaunchPrompts((prev) => ({
         ...prev,
@@ -1107,7 +1143,7 @@ export default function App() {
         threadType: options.threadType,
         projectId: options.workspace?.id,
         projectLabel: options.workspace?.label,
-        fileEntries: workspaceEntries,
+        fileEntries: launchFileEntries,
         initialPrompt: options.prompt,
         navigateOnCreate: !shouldUseChatLaunchTransition,
       });
@@ -1524,6 +1560,50 @@ export default function App() {
     setAnthropicApiKeyDraft(next);
     toast('Anthropic sample UI key applied.');
   }, [toast]);
+
+  const handleRunDeepResearchSearchEngineTest = useCallback(async () => {
+    setDeepResearchSearchTestRunning(true);
+    setDeepResearchSearchTestResult(null);
+
+    try {
+      const result = await runDeepResearchSearchEngineTest();
+      setDeepResearchSearchTestResult(result);
+      toast(result.summary);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const fallbackResult: DeepResearchSearchEngineTestResult = {
+        status: 'fail',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        durationMs: 0,
+        summary: 'The deep research fetch diagnostic failed before it could finish.',
+        reasoning: message,
+        reportText: [
+          'Deep Research Search Engine Test',
+          'Status: FAIL',
+          `Reasoning: ${message}`,
+        ].join('\n'),
+        probes: [],
+      };
+      setDeepResearchSearchTestResult(fallbackResult);
+      toast(fallbackResult.summary);
+    } finally {
+      setDeepResearchSearchTestRunning(false);
+    }
+  }, [toast]);
+
+  const handleDownloadDeepResearchSearchEngineTest = useCallback(() => {
+    if (!deepResearchSearchTestResult) return;
+
+    const fileName = `deep-research-search-engine-test-${deepResearchSearchTestResult.status}-${formatDiagnosticFilenameTimestamp(deepResearchSearchTestResult.completedAt)}.md`;
+    const blob = new Blob([deepResearchSearchTestResult.reportText], { type: 'text/markdown;charset=utf-8' });
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(anchor.href);
+    toast(`Downloaded ${fileName}`);
+  }, [deepResearchSearchTestResult, toast]);
 
   const chatHistoryBytes = ready ? measureJsonBytes(chats) : 0;
   const workspaceStorageBytes = estimateLocalStorageEntryBytes(
@@ -2087,7 +2167,6 @@ export default function App() {
 
                           <div className="settings-storage-breakdown">
                             {storageBuckets.map((bucket) => {
-                              const share = appStorageBytes > 0 ? (bucket.bytes / appStorageBytes) * 100 : 0;
                               return (
                                 <div key={bucket.id} className="settings-storage-row">
                                   <div className="settings-storage-row-main">
@@ -2194,6 +2273,129 @@ export default function App() {
                           </span>
                         </button>
                       </div>
+
+                      <div className="settings-developer-tools-card settings-diagnostic-card">
+                        <div className="settings-developer-tools-copy">
+                          <span className="settings-developer-tools-icon" aria-hidden="true">
+                            <IconSearch size={17} />
+                          </span>
+
+                          <div className="settings-developer-tools-text">
+                            <strong>Deep Research Search Engine Test</strong>
+                            <p>Runs DuckDuckGo and Google Search through the live deep-research fetch pipeline. The test only passes if each engine can fetch search results, parse them, scrape destination pages, and verify known information.</p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="btn settings-diagnostic-run-btn"
+                          onClick={() => void handleRunDeepResearchSearchEngineTest()}
+                          disabled={deepResearchSearchTestRunning}
+                        >
+                          <IconRefreshCw size={15} />
+                          {deepResearchSearchTestRunning ? 'Running Test...' : deepResearchSearchTestResult ? 'Run Again' : 'Run Test'}
+                        </button>
+                      </div>
+
+                      {(deepResearchSearchTestRunning || deepResearchSearchTestResult) && (
+                        <div
+                          className={`settings-diagnostic-results${deepResearchSearchTestResult?.status === 'fail' ? ' is-fail' : ''}`}
+                          aria-live="polite"
+                        >
+                          <div className="settings-diagnostic-results-head">
+                            <span className={`settings-diagnostic-badge${deepResearchSearchTestRunning ? ' running' : deepResearchSearchTestResult?.status === 'pass' ? ' pass' : ' fail'}`}>
+                              {deepResearchSearchTestRunning ? (
+                                <IconRefreshCw size={14} />
+                              ) : deepResearchSearchTestResult?.status === 'pass' ? (
+                                <IconCheck size={14} />
+                              ) : (
+                                <IconX size={14} />
+                              )}
+                              <span>
+                                {deepResearchSearchTestRunning ? 'Running' : deepResearchSearchTestResult?.status === 'pass' ? 'Pass' : 'Fail'}
+                              </span>
+                            </span>
+
+                            <span className="settings-inline-note">
+                              {deepResearchSearchTestRunning
+                                ? 'Checking DuckDuckGo and Google Search through the live /__fetch transport...'
+                                : deepResearchSearchTestResult
+                                  ? `Last run ${formatDiagnosticTimestamp(deepResearchSearchTestResult.completedAt)} • ${formatDiagnosticDuration(deepResearchSearchTestResult.durationMs)}`
+                                  : ''}
+                            </span>
+                          </div>
+
+                          {!deepResearchSearchTestRunning && deepResearchSearchTestResult && (
+                            <>
+                              <p className="settings-diagnostic-summary">{deepResearchSearchTestResult.summary}</p>
+
+                              <div className="settings-diagnostic-actions">
+                                <button
+                                  type="button"
+                                  className="btn settings-secondary-btn settings-diagnostic-download-btn"
+                                  onClick={handleDownloadDeepResearchSearchEngineTest}
+                                >
+                                  <IconDownload size={14} />
+                                  Download Report (.md)
+                                </button>
+                                <span className="settings-inline-note">
+                                  Share the downloaded file directly with developers or upload it back here for debugging.
+                                </span>
+                              </div>
+
+                              {deepResearchSearchTestResult.probes.length > 0 && (
+                                <div className="settings-diagnostic-engine-grid">
+                                  {deepResearchSearchTestResult.probes.map((probe) => (
+                                    <div
+                                      key={probe.engine}
+                                      className={`settings-diagnostic-engine-card ${probe.status}`}
+                                    >
+                                      <div className="settings-diagnostic-engine-head">
+                                        <strong>{probe.label}</strong>
+                                        <span className={`settings-diagnostic-engine-status ${probe.status}`}>
+                                          {probe.status === 'pass' ? 'Pass' : 'Fail'}
+                                        </span>
+                                      </div>
+
+                                      {probe.rootCause && (
+                                        <p className="settings-diagnostic-engine-cause">
+                                          <strong>Root cause:</strong> {probe.rootCause}
+                                        </p>
+                                      )}
+
+                                      <p>{probe.reasoning}</p>
+
+                                      <div className="settings-diagnostic-engine-meta">
+                                        <span>{probe.searchResultCount} parsed</span>
+                                        <span>{probe.scrapedPageCount} scraped</span>
+                                        <span>{formatDiagnosticDuration(probe.durationMs)}</span>
+                                      </div>
+
+                                      {probe.verifiedUrl && (
+                                        <a
+                                          className="settings-diagnostic-engine-link"
+                                          href={probe.verifiedUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          {probe.verifiedTitle || probe.verifiedUrl}
+                                        </a>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {deepResearchSearchTestResult.status === 'fail' && (
+                                <div className="settings-diagnostic-report">
+                                  <strong>Failure reasoning for developers</strong>
+                                  <pre>{deepResearchSearchTestResult.reportText}</pre>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
                     </section>
                   )}
                 </div>

@@ -1,5 +1,4 @@
 // FILE: src/components/StreamingPhaseIndicator.tsx
-import React from 'react';
 import type { StreamingPhase } from '../types';
 
 interface Props {

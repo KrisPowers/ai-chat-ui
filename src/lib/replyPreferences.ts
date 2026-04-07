@@ -1,4 +1,4 @@
-import type { ReplyFeedback, ReplyPreferenceRecord, ThreadType } from '../types';
+import type { ReplyPreferenceRecord, ThreadType } from '../types';
 
 export const REPLY_PREFERENCES_STORAGE_KEY = 'larry_reply_preferences_v1';
 export const REPLY_PREFERENCES_UPDATED_EVENT = 'larry-reply-preferences-updated';
