@@ -1,1 +1,12 @@
 /node_modules
+/build
+/bin
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.codex-vite-*.log
+.codex-vite-current.*.log
+.tmp-skills/
+tmp-fetch-runtime/
+tmp-fetch-test/
+package.json.md5

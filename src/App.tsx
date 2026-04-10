@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { ChatPanel } from './components/ChatPanel';
-import { ChatHistoryDrawer } from './components/ChatHistoryDrawer';
+import { CodeWorkspaceStage } from './components/CodeWorkspaceStage';
 import { PromptLibraryView } from './components/PromptLibraryView';
 import { Sidebar } from './components/Sidebar';
 import { useOllama } from './hooks/useOllama';
@@ -11,38 +11,26 @@ import { createRegistry, updateRegistry } from './lib/fileRegistry';
 import { mergeStoredFileEntries } from './lib/chatAttachments';
 import { runDeepResearchSearchEngineTest } from './lib/fetcher';
 import {
-  ANTHROPIC_API_KEY_STORAGE_KEY,
   ANTHROPIC_UI_SAMPLE_KEY,
   DEFAULT_OLLAMA_BASE,
-  getAnthropicApiKey,
   getModelDisplayLabel,
-  getOpenAIApiKey,
-  getOllamaBase,
-  OLLAMA_BASE_STORAGE_KEY,
   OPENAI_UI_SAMPLE_KEY,
-  OPENAI_API_KEY_STORAGE_KEY,
   normalizeModelHandle,
+  normalizeOllamaBase,
   resolveModelHandle,
-  setAnthropicApiKey as persistAnthropicApiKey,
-  setOllamaBase as persistOllamaBase,
-  setOpenAIApiKey as persistOpenAIApiKey,
 } from './lib/ollama';
 import { DEFAULT_PRESET_ID, PRESETS, describePreset } from './lib/presets';
-import { REPLY_PREFERENCES_STORAGE_KEY, clearReplyPreferences } from './lib/replyPreferences';
+import { clearReplyPreferences } from './lib/replyPreferences';
+import { isDesktopRuntime, loadStorageSnapshot, saveAppSettings, saveChat as persistChatRecord, saveWorkspaces } from './lib/persistence';
+import { isWorkspaceHostAvailable, openWorkspaceInExplorer, pickWorkspaceDirectory, scanWorkspace } from './lib/workspaceHost';
 import { IconCheck, IconDownload, IconFolderPlus, IconHexagon, IconMessageSquare, IconRefreshCw, IconSearch, IconSettings, IconTerminal, IconTrash2, IconUpload, IconX } from './components/Icon';
-import { buildWorkspaceGroups, deriveWorkspaceFromChat, normaliseProjectId, type WorkspaceGroup } from './lib/workspaces';
+import { applyWorkspaceSnapshot, buildWorkspaceGroups, buildWorkspaceIdFromPath, deriveWorkspaceFromChat, findWorkspaceGroup, normaliseProjectId, type WorkspaceGroup } from './lib/workspaces';
 import { ProviderIcon } from './components/ProviderIcon';
-import type { ChatReasoningEffort, Panel, ChatRecord, ProjectFolder, ThreadType } from './types';
+import type { AppSettings, ChatReasoningEffort, Panel, ChatRecord, ProjectFolder, ThreadType, WorkspaceSnapshot } from './types';
 import type { FileRegistry } from './lib/fileRegistry';
 import type { DeepResearchSearchEngineTestResult } from './lib/fetcher';
 
-const FOLDERS_STORAGE_KEY = 'larry_project_folders_v1';
-const DEFAULT_MODEL_STORAGE_KEY = 'larry_default_model_v1';
-const DEFAULT_CHAT_PRESET_STORAGE_KEY = 'larry_default_chat_preset_v1';
-const DEFAULT_REASONING_STORAGE_KEY = 'larry_default_reasoning_effort_v1';
-const DEVELOPER_TOOLS_STORAGE_KEY = 'larry_developer_tools_v1';
-const ADVANCED_USE_STORAGE_KEY = 'larry_advanced_use_v1';
-const MAX_VISIBLE_CHAT_PANELS = 3;
+const MAX_VISIBLE_CHAT_PANELS = 2;
 const CHAT_FORM_TRANSITION_MIN_MS = 2000;
 const DEFAULT_REASONING_EFFORT: ChatReasoningEffort = 'balanced';
 const CHAT_DEFAULT_PRESETS = PRESETS.filter((preset) => preset.id !== 'code');
@@ -59,6 +47,8 @@ interface BrowserStorageSnapshot {
   quota?: number;
 }
 
+const DESKTOP_RUNTIME = isDesktopRuntime();
+
 type AppRoute =
   | { kind: 'landing' }
   | { kind: 'chat-start' }
@@ -67,7 +57,18 @@ type AppRoute =
   | { kind: 'chat'; chatId: string }
   | { kind: 'not-found'; path: string };
 
-type SettingsTabId = 'workspace' | 'providers' | 'data' | 'advanced';
+type SettingsTabId = 'workspace' | 'providers' | 'data' | 'shortcuts' | 'advanced';
+
+type ShortcutInsight = {
+  keys: string[];
+  action: string;
+};
+
+type ShortcutInsightGroup = {
+  id: string;
+  title: string;
+  items: ShortcutInsight[];
+};
 
 const SETTINGS_TAB_META: Record<SettingsTabId, {
   label: string;
@@ -88,6 +89,11 @@ const SETTINGS_TAB_META: Record<SettingsTabId, {
     label: 'Data',
     title: 'Local data and transfers',
     description: 'Inspect storage usage, export local app data, and clear saved memory when needed.',
+  },
+  shortcuts: {
+    label: 'Shortcuts',
+    title: 'Shortcut insights and navigation',
+    description: 'Track live keyboard shortcuts and keep power-user actions easy to discover as the workspace grows.',
   },
   advanced: {
     label: 'Advanced',
@@ -121,9 +127,10 @@ function measureStringBytes(value: string): number {
   return new Blob([value]).size;
 }
 
-function measureJsonBytes(value: unknown): number {
+function measurePersistedBytes(value: unknown): number {
   const serialized = JSON.stringify(value);
-  return serialized ? measureStringBytes(serialized) : 0;
+  if (!serialized || serialized === '{}' || serialized === '[]') return 0;
+  return measureStringBytes(serialized);
 }
 
 function estimateLocalStorageEntryBytes(key: string, value: string): number {
@@ -243,12 +250,16 @@ function buildStorageVisualSegments<T extends { bytes: number }>(buckets: T[]) {
 }
 
 function getCustomPresetStorageUsage(): { bytes: number; count: number } {
+  if (DESKTOP_RUNTIME) {
+    return { bytes: 0, count: 0 };
+  }
+
   try {
     let bytes = 0;
     let count = 0;
     for (let i = 0; i < localStorage.length; i += 1) {
       const key = localStorage.key(i);
-      if (!key || key === DEFAULT_MODEL_STORAGE_KEY || !/preset/i.test(key)) continue;
+      if (!key || !/preset/i.test(key)) continue;
       const value = localStorage.getItem(key) ?? '';
       bytes += estimateLocalStorageEntryBytes(key, value);
       count += 1;
@@ -320,22 +331,14 @@ function registryFromEntries(entries?: ChatRecord['fileEntries']): FileRegistry 
   return new Map(cloneFileEntries(entries).map((entry) => [entry.path, entry]));
 }
 
-function isEditableTarget(target: EventTarget | null): boolean {
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  const tagName = target.tagName;
-  return (
-    target.isContentEditable ||
-    tagName === 'INPUT' ||
-    tagName === 'TEXTAREA' ||
-    tagName === 'SELECT'
-  );
+  if (target.isContentEditable) return true;
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"], [contenteditable="plaintext-only"]'));
 }
 
-function isPinnedDraftChatPanel(panel: Panel): boolean {
-  if (resolveThreadSurface(panel) !== 'chat') return false;
-
-  const hasAssistantReply = panel.messages.some((message) => message.role === 'assistant');
-  return !hasAssistantReply;
+function isChatPanelKeyboardTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest('.chat-panel'));
 }
 
 function newPanel(defaultModel: string, chatData?: Partial<ChatRecord>): Panel {
@@ -426,18 +429,18 @@ interface ChatLaunchTransitionState {
 }
 
 export default function App() {
-  const [ollamaEndpoint, setOllamaEndpoint] = useState(() => getOllamaBase());
-  const [ollamaEndpointDraft, setOllamaEndpointDraft] = useState(() => getOllamaBase());
-  const [openAIApiKey, setOpenAIApiKey] = useState(() => getOpenAIApiKey());
-  const [openAIApiKeyDraft, setOpenAIApiKeyDraft] = useState(() => getOpenAIApiKey());
-  const [anthropicApiKey, setAnthropicApiKey] = useState(() => getAnthropicApiKey());
-  const [anthropicApiKeyDraft, setAnthropicApiKeyDraft] = useState(() => getAnthropicApiKey());
+  const [ollamaEndpoint, setOllamaEndpoint] = useState(DEFAULT_OLLAMA_BASE);
+  const [ollamaEndpointDraft, setOllamaEndpointDraft] = useState(DEFAULT_OLLAMA_BASE);
+  const [openAIApiKey, setOpenAIApiKey] = useState('');
+  const [openAIApiKeyDraft, setOpenAIApiKeyDraft] = useState('');
+  const [anthropicApiKey, setAnthropicApiKey] = useState('');
+  const [anthropicApiKeyDraft, setAnthropicApiKeyDraft] = useState('');
   const { models, providers, status } = useOllama({
     endpoint: ollamaEndpoint,
     openAIApiKey,
     anthropicApiKey,
   });
-  const { chats, ready, save, remove, clearAll } = useDB();
+  const { chats, ready, save, remove, clearAll, refresh } = useDB();
   const { replyPreferences } = useReplyPreferences();
   const { toast } = useToast();
   const [panels, setPanels] = useState<Panel[]>([]);
@@ -459,18 +462,15 @@ export default function App() {
   const storagePopupHideTimeoutRef = useRef<number | null>(null);
   const importLogsSettingsRef = useRef<HTMLInputElement>(null);
   const importWorkspaceLauncherRef = useRef<HTMLInputElement>(null);
-  const [workspaceLauncherOpen, setWorkspaceLauncherOpen] = useState(false);
-  const [workspaceLauncherMode, setWorkspaceLauncherMode] = useState<'create' | 'import'>(
-    'create',
-  );
-  const [workspaceDraftName, setWorkspaceDraftName] = useState('');
+  const [selectedCodeWorkspaceId, setSelectedCodeWorkspaceId] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
-  const [chatHistoryDrawerOpen, setChatHistoryDrawerOpen] = useState(false);
   const [chatStarterVisible, setChatStarterVisible] = useState(false);
   const [chatStarterPanelId, setChatStarterPanelId] = useState<string | null>(null);
   const [chatLaunchTransition, setChatLaunchTransition] = useState<ChatLaunchTransitionState | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>('workspace');
+  const [settingsReady, setSettingsReady] = useState(false);
+  const workspaceMergeInFlightRef = useRef(false);
 
   const resolvedDefaultModel = resolveModelHandle(defaultModel, models);
 
@@ -498,45 +498,31 @@ export default function App() {
   }, [navigate, route.kind]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(FOLDERS_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as ProjectFolder[];
-      if (Array.isArray(parsed)) setProjectFolders(parsed);
-    } catch {
-      // ignore malformed local cache
-    }
-  }, []);
+    let cancelled = false;
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(DEFAULT_MODEL_STORAGE_KEY);
-      if (raw) setDefaultModel(raw);
-    } catch {
-      // ignore malformed local cache
-    }
-  }, []);
+    void (async () => {
+      const snapshot = await loadStorageSnapshot();
+      if (cancelled) return;
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(DEFAULT_CHAT_PRESET_STORAGE_KEY);
-      if (raw && CHAT_DEFAULT_PRESETS.some((preset) => preset.id === raw)) {
-        setDefaultChatPreset(raw);
+      setProjectFolders(snapshot.workspaces);
+      setDefaultModel(snapshot.settings.defaultModel);
+      if (CHAT_DEFAULT_PRESETS.some((preset) => preset.id === snapshot.settings.defaultChatPreset)) {
+        setDefaultChatPreset(snapshot.settings.defaultChatPreset);
       }
-    } catch {
-      // ignore malformed local cache
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(DEFAULT_REASONING_STORAGE_KEY);
-      if (isChatReasoningEffort(raw)) {
-        setDefaultReasoningEffort(raw);
+      if (isChatReasoningEffort(snapshot.settings.defaultReasoningEffort)) {
+        setDefaultReasoningEffort(snapshot.settings.defaultReasoningEffort);
       }
-    } catch {
-      // ignore malformed local cache
-    }
+      setDeveloperToolsEnabled(snapshot.settings.developerToolsEnabled);
+      setAdvancedUseEnabled(snapshot.settings.advancedUseEnabled);
+      setOllamaEndpoint(snapshot.settings.ollamaEndpoint);
+      setOpenAIApiKey(snapshot.settings.openAIApiKey);
+      setAnthropicApiKey(snapshot.settings.anthropicApiKey);
+      setSettingsReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -552,76 +538,133 @@ export default function App() {
   }, [anthropicApiKey]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(DEVELOPER_TOOLS_STORAGE_KEY);
-      if (raw === '1' || raw === 'true') {
-        setDeveloperToolsEnabled(true);
+    if (!settingsReady) return;
+    void saveWorkspaces(projectFolders);
+  }, [projectFolders, settingsReady]);
+
+  useEffect(() => {
+    if (!settingsReady || !ready) return;
+    if (workspaceMergeInFlightRef.current) return;
+
+    const normalizeLabel = (value: string) => value.trim().toLowerCase();
+    const merges = projectFolders.flatMap((linkedFolder) => {
+      if (!linkedFolder.rootPath) return [];
+
+      const legacyFolder = projectFolders.find((candidate) =>
+        candidate.id !== linkedFolder.id &&
+        !candidate.rootPath &&
+        normalizeLabel(candidate.label) === normalizeLabel(linkedFolder.label),
+      );
+      if (!legacyFolder) return [];
+
+      const legacyChatCount = chats.filter((chat) => chat.projectId === legacyFolder.id).length;
+      const linkedChatCount = chats.filter((chat) => chat.projectId === linkedFolder.id).length;
+      const legacyLooksCanonical =
+        legacyFolder.id === normaliseProjectId(legacyFolder.label) || legacyChatCount > linkedChatCount;
+
+      return [{
+        canonicalFolder: legacyLooksCanonical ? legacyFolder : linkedFolder,
+        linkedFolder,
+        legacyFolder,
+      }];
+    });
+
+    if (!merges.length) return;
+
+    workspaceMergeInFlightRef.current = true;
+    void (async () => {
+      try {
+        const remap = new Map<string, string>();
+        const mergedFolders = [...projectFolders];
+
+        for (const { canonicalFolder, linkedFolder, legacyFolder } of merges) {
+          const otherFolder = canonicalFolder.id === linkedFolder.id ? legacyFolder : linkedFolder;
+          const sourceFolder = linkedFolder.rootPath ? linkedFolder : canonicalFolder.rootPath ? canonicalFolder : linkedFolder;
+          const fallbackEntries = sourceFolder.fileEntries?.length ? sourceFolder.fileEntries : canonicalFolder.fileEntries;
+
+          remap.set(otherFolder.id, canonicalFolder.id);
+
+          const mergedFolder: ProjectFolder = {
+            id: canonicalFolder.id,
+            label: canonicalFolder.label || sourceFolder.label,
+            createdAt: Math.min(canonicalFolder.createdAt, sourceFolder.createdAt),
+            rootPath: sourceFolder.rootPath,
+            fileTree: sourceFolder.fileTree,
+            fileEntries: fallbackEntries,
+            fileCount: sourceFolder.fileCount ?? fallbackEntries?.length ?? canonicalFolder.fileCount,
+            directoryCount: sourceFolder.directoryCount ?? canonicalFolder.directoryCount,
+            syncedAt: sourceFolder.syncedAt ?? canonicalFolder.syncedAt,
+            archivedAt: canonicalFolder.archivedAt ?? sourceFolder.archivedAt,
+          };
+
+          const canonicalIndex = mergedFolders.findIndex((folder) => folder.id === canonicalFolder.id);
+          if (canonicalIndex !== -1) {
+            mergedFolders[canonicalIndex] = mergedFolder;
+          }
+
+          const otherIndex = mergedFolders.findIndex((folder) => folder.id === otherFolder.id);
+          if (otherIndex !== -1) {
+            mergedFolders.splice(otherIndex, 1);
+          }
+        }
+
+        setProjectFolders(mergedFolders);
+        setPanels((prev) => prev.map((panel) => {
+          const nextProjectId = panel.projectId ? remap.get(panel.projectId) ?? panel.projectId : panel.projectId;
+          if (nextProjectId === panel.projectId) return panel;
+          return { ...panel, projectId: nextProjectId };
+        }));
+        setSelectedCodeWorkspaceId((current) => current ? remap.get(current) ?? current : current);
+
+        const chatsToPersist = chats
+          .filter((chat) => chat.projectId && remap.has(chat.projectId))
+          .map((chat) => ({
+            ...chat,
+            projectId: remap.get(chat.projectId!) ?? chat.projectId,
+          }));
+
+        if (chatsToPersist.length) {
+          await Promise.all(chatsToPersist.map((chat) => persistChatRecord(chat)));
+          await refresh();
+        }
+      } finally {
+        workspaceMergeInFlightRef.current = false;
       }
-    } catch {
-      // ignore malformed local cache
-    }
-  }, []);
+    })();
+  }, [chats, projectFolders, ready, refresh, settingsReady]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(ADVANCED_USE_STORAGE_KEY);
-      if (raw === '1' || raw === 'true') {
-        setAdvancedUseEnabled(true);
-      }
-    } catch {
-      // ignore malformed local cache
-    }
-  }, []);
+    if (!settingsReady) return;
 
-  useEffect(() => {
-    localStorage.setItem(FOLDERS_STORAGE_KEY, JSON.stringify(projectFolders));
-  }, [projectFolders]);
+    const nextSettings: AppSettings = {
+      defaultModel,
+      defaultChatPreset,
+      defaultReasoningEffort,
+      developerToolsEnabled,
+      advancedUseEnabled,
+      ollamaEndpoint,
+      openAIApiKey,
+      anthropicApiKey,
+    };
 
-  useEffect(() => {
-    if (defaultModel) {
-      localStorage.setItem(DEFAULT_MODEL_STORAGE_KEY, defaultModel);
-    } else {
-      localStorage.removeItem(DEFAULT_MODEL_STORAGE_KEY);
-    }
-  }, [defaultModel]);
-
-  useEffect(() => {
-    if (defaultChatPreset && defaultChatPreset !== DEFAULT_PRESET_ID) {
-      localStorage.setItem(DEFAULT_CHAT_PRESET_STORAGE_KEY, defaultChatPreset);
-    } else {
-      localStorage.removeItem(DEFAULT_CHAT_PRESET_STORAGE_KEY);
-    }
-  }, [defaultChatPreset]);
-
-  useEffect(() => {
-    if (defaultReasoningEffort !== DEFAULT_REASONING_EFFORT) {
-      localStorage.setItem(DEFAULT_REASONING_STORAGE_KEY, defaultReasoningEffort);
-    } else {
-      localStorage.removeItem(DEFAULT_REASONING_STORAGE_KEY);
-    }
-  }, [defaultReasoningEffort]);
-
-  useEffect(() => {
-    if (developerToolsEnabled) {
-      localStorage.setItem(DEVELOPER_TOOLS_STORAGE_KEY, '1');
-    } else {
-      localStorage.removeItem(DEVELOPER_TOOLS_STORAGE_KEY);
-    }
-  }, [developerToolsEnabled]);
-
-  useEffect(() => {
-    if (advancedUseEnabled) {
-      localStorage.setItem(ADVANCED_USE_STORAGE_KEY, '1');
-    } else {
-      localStorage.removeItem(ADVANCED_USE_STORAGE_KEY);
-    }
-  }, [advancedUseEnabled]);
+    void saveAppSettings(nextSettings);
+  }, [
+    advancedUseEnabled,
+    anthropicApiKey,
+    defaultChatPreset,
+    defaultModel,
+    defaultReasoningEffort,
+    developerToolsEnabled,
+    ollamaEndpoint,
+    openAIApiKey,
+    settingsReady,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadBrowserStorageEstimate() {
-      if (typeof navigator === 'undefined' || !navigator.storage?.estimate) {
+      if (DESKTOP_RUNTIME || typeof navigator === 'undefined' || !navigator.storage?.estimate) {
         if (!cancelled) setBrowserStorage({ supported: false });
         return;
       }
@@ -658,21 +701,6 @@ export default function App() {
     replyPreferences.length,
   ]);
 
-  useEffect(() => {
-    if (!workspaceLauncherOpen) return undefined;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setWorkspaceLauncherOpen(false);
-        setWorkspaceLauncherMode('create');
-        setWorkspaceDraftName('');
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [workspaceLauncherOpen]);
-
   useEffect(() => () => {
     if (storagePopupHideTimeoutRef.current != null) {
       window.clearTimeout(storagePopupHideTimeoutRef.current);
@@ -691,18 +719,6 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [confirmBusy, confirmDialog]);
-
-  const closeWorkspaceLauncher = useCallback(() => {
-    setWorkspaceLauncherOpen(false);
-    setWorkspaceLauncherMode('create');
-    setWorkspaceDraftName('');
-  }, []);
-
-  const openWorkspaceLauncher = useCallback((mode: 'create' | 'import' = 'create') => {
-    setWorkspaceLauncherMode(mode);
-    setWorkspaceDraftName('');
-    setWorkspaceLauncherOpen(true);
-  }, []);
 
   const requestConfirmation = useCallback((dialog: ConfirmDialogState) => {
     setConfirmDialog(dialog);
@@ -821,6 +837,12 @@ export default function App() {
     id: string;
     label: string;
     createdAt?: number;
+    rootPath?: string;
+    fileTree?: ProjectFolder['fileTree'];
+    fileCount?: number;
+    directoryCount?: number;
+    syncedAt?: number;
+    archivedAt?: number;
     fileEntries?: ProjectFolder['fileEntries'];
   }) => {
     setProjectFolders((prev) => {
@@ -833,6 +855,12 @@ export default function App() {
             id: folder.id,
             label: folder.label,
             createdAt: folder.createdAt ?? Date.now(),
+            rootPath: folder.rootPath,
+            fileTree: folder.fileTree,
+            fileCount: folder.fileCount,
+            directoryCount: folder.directoryCount,
+            syncedAt: folder.syncedAt,
+            archivedAt: folder.archivedAt,
             fileEntries: nextEntries,
           },
         ];
@@ -843,23 +871,209 @@ export default function App() {
         return {
           ...candidate,
           label: folder.label,
+          rootPath: folder.rootPath ?? candidate.rootPath,
+          fileTree: folder.fileTree ?? candidate.fileTree,
+          fileCount: folder.fileCount ?? candidate.fileCount,
+          directoryCount: folder.directoryCount ?? candidate.directoryCount,
+          syncedAt: folder.syncedAt ?? candidate.syncedAt,
+          archivedAt: folder.archivedAt ?? candidate.archivedAt,
           fileEntries: nextEntries ?? candidate.fileEntries,
         };
       });
     });
   }, []);
 
-  const handleCreateFolder = useCallback((label: string) => {
-    const clean = label.trim();
+  const applyWorkspaceSnapshotToState = useCallback((
+    workspace: Pick<ProjectFolder, 'id' | 'label' | 'createdAt' | 'rootPath'>,
+    snapshot: WorkspaceSnapshot,
+    options: { unarchive?: boolean } = {},
+  ) => {
+    const nextFolder = applyWorkspaceSnapshot({
+      id: workspace.id,
+      label: workspace.label,
+      createdAt: workspace.createdAt,
+      rootPath: workspace.rootPath ?? snapshot.rootPath,
+      archivedAt: options.unarchive ? 0 : undefined,
+    }, snapshot);
+
+    upsertProjectFolder(nextFolder);
+    setPanels((prev) => prev.map((panel) => (
+      panel.projectId !== workspace.id
+        ? panel
+        : {
+            ...panel,
+            projectLabel: workspace.label,
+            fileRegistry: registryFromEntries(snapshot.fileEntries),
+          }
+    )));
+  }, [upsertProjectFolder]);
+
+  const syncWorkspaceFolder = useCallback(async (
+    workspace: Pick<ProjectFolder, 'id' | 'label' | 'createdAt' | 'rootPath'>,
+    options: { silent?: boolean } = {},
+  ) => {
+    if (!workspace.rootPath) {
+      if (!options.silent) {
+        toast('This workspace is not linked to a local folder yet.');
+      }
+      return null;
+    }
+
+    try {
+      const snapshot = await scanWorkspace(workspace.rootPath);
+      applyWorkspaceSnapshotToState(workspace, snapshot, { unarchive: true });
+      if (!options.silent) {
+        toast(`Refreshed "${workspace.label}".`);
+      }
+      return snapshot;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to refresh that workspace.';
+      if (!options.silent) {
+        toast(message);
+      }
+      return null;
+    }
+  }, [applyWorkspaceSnapshotToState, toast]);
+
+  const openWorkspaceLauncher = useCallback(async () => {
+    if (!DESKTOP_RUNTIME || !isWorkspaceHostAvailable()) {
+      importWorkspaceLauncherRef.current?.click();
+      return;
+    }
+
+    try {
+      const selection = await pickWorkspaceDirectory();
+      if (!selection) return;
+
+      const normalizeLabel = (value: string) => value.trim().toLowerCase();
+      const duplicate = projectFolders.find((folder) => (
+        folder.rootPath?.toLowerCase() === selection.rootPath.toLowerCase()
+      )) ?? (
+        selectedCodeWorkspaceId
+          ? projectFolders.find((folder) => (
+            folder.id === selectedCodeWorkspaceId &&
+            !folder.rootPath &&
+            normalizeLabel(folder.label) === normalizeLabel(selection.label)
+          ))
+          : undefined
+      ) ?? projectFolders.find((folder) => (
+        !folder.rootPath &&
+        (
+          folder.id === normaliseProjectId(selection.label) ||
+          normalizeLabel(folder.label) === normalizeLabel(selection.label)
+        )
+      ));
+      const workspaceId = duplicate?.id ?? buildWorkspaceIdFromPath(selection.rootPath, selection.label);
+      const workspaceLabel = duplicate?.label ?? selection.label;
+      const createdAt = duplicate?.createdAt ?? Date.now();
+
+      applyWorkspaceSnapshotToState({
+        id: workspaceId,
+        label: workspaceLabel,
+        createdAt,
+        rootPath: selection.rootPath,
+      }, selection.snapshot, { unarchive: true });
+
+      setSelectedCodeWorkspaceId(workspaceId);
+      navigate('/code');
+      toast(duplicate ? `Refreshed workspace "${workspaceLabel}".` : `Linked workspace "${workspaceLabel}".`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to link that workspace.';
+      toast(message);
+    }
+  }, [applyWorkspaceSnapshotToState, navigate, projectFolders, toast]);
+
+  const handleSelectCodeWorkspace = useCallback((workspace: WorkspaceGroup) => {
+    setSelectedCodeWorkspaceId(workspace.id);
+    navigate('/code');
+    void syncWorkspaceFolder({
+      id: workspace.id,
+      label: workspace.label,
+      createdAt: workspace.createdAt,
+      rootPath: workspace.rootPath,
+    }, { silent: true });
+  }, [navigate, syncWorkspaceFolder]);
+
+  const handleClearSelectedCodeWorkspace = useCallback(() => {
+    setSelectedCodeWorkspaceId(null);
+    const currentRecord = route.kind === 'chat'
+      ? panels.find((panel) => panel.id === route.chatId) ?? chats.find((chat) => chat.id === route.chatId)
+      : null;
+    if (route.kind === 'chat' && resolveThreadSurface(currentRecord) === 'code') {
+      navigate('/code');
+    }
+  }, [chats, navigate, panels, route]);
+
+  const handleRenameWorkspace = useCallback(async (workspace: WorkspaceGroup, nextLabel: string) => {
+    const clean = nextLabel.trim();
     if (!clean) {
       toast('Enter a workspace name.');
-      return false;
+      return;
     }
-    const id = normaliseProjectId(clean);
-    upsertProjectFolder({ id, label: clean, fileEntries: [] });
-    toast(`Created workspace "${clean}".`);
-    return true;
-  }, [toast, upsertProjectFolder]);
+
+    upsertProjectFolder({ id: workspace.id, label: clean });
+    setPanels((prev) => prev.map((panel) => (
+      panel.projectId === workspace.id
+        ? { ...panel, projectLabel: clean }
+        : panel
+    )));
+
+    const relatedChats = chats.filter((chat) => chat.projectId === workspace.id);
+    await Promise.all(relatedChats.map((chat) => save({
+      ...chat,
+      projectLabel: clean,
+    })));
+
+    toast(`Renamed workspace to "${clean}".`);
+  }, [chats, save, toast, upsertProjectFolder]);
+
+  const requestArchiveWorkspace = useCallback((workspace: WorkspaceGroup) => {
+    requestConfirmation({
+      title: 'Archive this workspace?',
+      message: 'The workspace will disappear from the active code list, but its saved chats will remain in local storage.',
+      confirmLabel: 'Archive workspace',
+      onConfirm: async () => {
+        upsertProjectFolder({
+          id: workspace.id,
+          label: workspace.label,
+          archivedAt: Date.now(),
+        });
+
+        setSelectedCodeWorkspaceId((current) => current === workspace.id ? null : current);
+        if (route.kind === 'chat') {
+          const currentRecord = panels.find((panel) => panel.id === route.chatId) ?? chats.find((chat) => chat.id === route.chatId);
+          if (currentRecord && deriveWorkspaceFromChat(currentRecord).id === workspace.id) {
+            navigate('/code');
+          }
+        }
+
+        toast(`Archived "${workspace.label}".`);
+      },
+    });
+  }, [chats, navigate, panels, requestConfirmation, route, toast, upsertProjectFolder]);
+
+  const handleOpenWorkspaceInExplorer = useCallback(async (workspace: WorkspaceGroup) => {
+    if (!workspace.rootPath) {
+      toast('This workspace is not linked to a local folder yet.');
+      return;
+    }
+
+    try {
+      await openWorkspaceInExplorer(workspace.rootPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to open that workspace in the file explorer.';
+      toast(message);
+    }
+  }, [toast]);
+
+  const handleRefreshWorkspace = useCallback((workspace: WorkspaceGroup) => {
+    void syncWorkspaceFolder({
+      id: workspace.id,
+      label: workspace.label,
+      createdAt: workspace.createdAt,
+      rootPath: workspace.rootPath,
+    });
+  }, [syncWorkspaceFolder]);
 
   const handleCreateChatInFolder = useCallback((folder: { id: string; label: string }, threadType: ThreadType = 'code') => {
     const workspaceEntries = cloneFileEntries(
@@ -1103,6 +1317,7 @@ export default function App() {
           await Promise.all(relatedChats.map((chat) => remove(chat.id)));
         }
 
+        setSelectedCodeWorkspaceId((current) => current === workspace.id ? null : current);
         setProjectFolders((prev) => prev.filter((folder) => folder.id !== workspace.id));
         setPanels((prev) => {
           const next = prev.filter((panel) => !relatedIds.has(panel.id) && panel.projectId !== workspace.id);
@@ -1153,8 +1368,8 @@ export default function App() {
       title: 'Clear saved reply memory?',
       message: 'This removes every liked and disliked reply preference saved locally for future response shaping.',
       confirmLabel: 'Clear reply memory',
-      onConfirm: () => {
-        clearReplyPreferences();
+      onConfirm: async () => {
+        await clearReplyPreferences();
         toast('Reply memory cleared.');
       },
     });
@@ -1166,6 +1381,7 @@ export default function App() {
     const payload = {
       version: 1,
       exportedAt,
+      storageMode: DESKTOP_RUNTIME ? 'desktop-sql' : 'browser',
       defaults: {
         defaultModel: resolvedDefaultModel,
         defaultChatPreset,
@@ -1378,6 +1594,12 @@ export default function App() {
     () => panels.filter((panel) => resolveThreadSurface(panel) === 'chat'),
     [panels],
   );
+  const chatViewportAnchorId = useMemo(
+    () => (route.kind === 'chat' && activeThreadSurface === 'chat'
+      ? activePanel?.id ?? route.chatId
+      : activePanelId),
+    [activePanel?.id, activePanelId, activeThreadSurface, route],
+  );
   const visibleChatPanels = useMemo(() => {
     if (!chatSurfacePanels.length) return [];
 
@@ -1385,47 +1607,19 @@ export default function App() {
       return chatSurfacePanels;
     }
 
-    const activeId = activePanel?.id ?? activePanelId ?? null;
-    const latestDraftPanel = [...chatSurfacePanels]
-      .reverse()
-      .find((panel) => isPinnedDraftChatPanel(panel)) ?? null;
-
-    if (!latestDraftPanel) {
-      const latestWindowStart = Math.max(0, chatSurfacePanels.length - MAX_VISIBLE_CHAT_PANELS);
-      if (!activeId) {
-        return chatSurfacePanels.slice(latestWindowStart);
-      }
-
-      const activeIndex = chatSurfacePanels.findIndex((panel) => panel.id === activeId);
-      if (activeIndex === -1) {
-        return chatSurfacePanels.slice(latestWindowStart);
-      }
-
-      const windowStart = activeIndex < latestWindowStart
-        ? activeIndex
-        : latestWindowStart;
-      return chatSurfacePanels.slice(windowStart, windowStart + MAX_VISIBLE_CHAT_PANELS);
+    const latestWindowStart = Math.max(0, chatSurfacePanels.length - MAX_VISIBLE_CHAT_PANELS);
+    if (!chatViewportAnchorId) {
+      return chatSurfacePanels.slice(latestWindowStart);
     }
 
-    const chosenPanelIds = new Set<string>([latestDraftPanel.id]);
-    if (activeId) {
-      chosenPanelIds.add(activeId);
+    const activeIndex = chatSurfacePanels.findIndex((panel) => panel.id === chatViewportAnchorId);
+    if (activeIndex === -1) {
+      return chatSurfacePanels.slice(latestWindowStart);
     }
 
-    const latestDraftIndex = chatSurfacePanels.findIndex(
-      (panel) => panel.id === latestDraftPanel.id,
-    );
-
-    for (let index = latestDraftIndex - 1; index >= 0 && chosenPanelIds.size < MAX_VISIBLE_CHAT_PANELS; index -= 1) {
-      chosenPanelIds.add(chatSurfacePanels[index].id);
-    }
-
-    for (let index = chatSurfacePanels.length - 1; index >= 0 && chosenPanelIds.size < MAX_VISIBLE_CHAT_PANELS; index -= 1) {
-      chosenPanelIds.add(chatSurfacePanels[index].id);
-    }
-
-    return chatSurfacePanels.filter((panel) => chosenPanelIds.has(panel.id)).slice(-MAX_VISIBLE_CHAT_PANELS);
-  }, [activePanel?.id, activePanelId, chatSurfacePanels]);
+    const windowStart = Math.min(activeIndex, latestWindowStart);
+    return chatSurfacePanels.slice(windowStart, windowStart + MAX_VISIBLE_CHAT_PANELS);
+  }, [chatSurfacePanels, chatViewportAnchorId]);
   const pendingChatLaunchPanel = useMemo(
     () => chatLaunchTransition
       ? panels.find((panel) => panel.id === chatLaunchTransition.chatId) ?? null
@@ -1477,10 +1671,7 @@ export default function App() {
       return filteredPanels;
     }
 
-    const activeChatPanelId =
-      route.kind === 'chat' && activeThreadSurface === 'chat'
-        ? activePanel?.id ?? route.chatId
-        : activePanelId;
+    const activeChatPanelId = chatViewportAnchorId;
 
     if (!activeChatPanelId) {
       return filteredPanels.slice(-limit);
@@ -1500,11 +1691,8 @@ export default function App() {
       selectedPanels.some((selectedPanel) => selectedPanel.id === panel.id),
     );
   }, [
-    activePanel?.id,
-    activePanelId,
-    activeThreadSurface,
+    chatViewportAnchorId,
     embeddedChatStarterPanelId,
-    route,
     showEmbeddedChatStarter,
     visibleChatPanels,
   ]);
@@ -1524,22 +1712,38 @@ export default function App() {
     () => buildWorkspaceGroups(codeSurfaceChats, projectFolders),
     [codeSurfaceChats, projectFolders],
   );
+  const selectedCodeWorkspace = useMemo(
+    () => findWorkspaceGroup(codeWorkspaceGroups, selectedCodeWorkspaceId),
+    [codeWorkspaceGroups, selectedCodeWorkspaceId],
+  );
   const handleCreateCodeThreadInFolder = useCallback(
     (folder: { id: string; label: string }) => handleCreateChatInFolder(folder, 'code'),
     [handleCreateChatInFolder],
   );
-  const handleOpenCodeWorkspace = useCallback((workspace: WorkspaceGroup) => {
-    const latestChat = [...workspace.chats].sort((left, right) => right.updatedAt - left.updatedAt)[0];
-    if (latestChat) {
-      handleOpenFromHistory(latestChat);
-      return;
-    }
+  const activeCodePanel = route.kind === 'chat' && activeThreadSurface === 'code'
+    ? activePanel
+    : null;
 
-    handleCreateCodeThreadInFolder({ id: workspace.id, label: workspace.label });
-  }, [handleCreateCodeThreadInFolder, handleOpenFromHistory]);
-  const handleShowCodeStarter = useCallback(() => {
-    navigate('/code');
-  }, [navigate]);
+  useEffect(() => {
+    if (route.kind !== 'chat' || activeThreadSurface !== 'code') return;
+
+    const persistedChat = chats.find((chat) => chat.id === route.chatId);
+    const activeWorkspaceId = persistedChat
+      ? deriveWorkspaceFromChat(persistedChat).id
+      : activeCodePanel?.projectId ?? null;
+    const canonicalWorkspace = findWorkspaceGroup(codeWorkspaceGroups, activeWorkspaceId);
+
+    if (!activeWorkspaceId) return;
+    const nextWorkspaceId = canonicalWorkspace?.id ?? activeWorkspaceId;
+    setSelectedCodeWorkspaceId((current) => current === nextWorkspaceId ? current : nextWorkspaceId);
+  }, [activeCodePanel?.projectId, activeThreadSurface, chats, codeWorkspaceGroups, route]);
+
+  useEffect(() => {
+    if (selectedCodeWorkspaceId && !findWorkspaceGroup(codeWorkspaceGroups, selectedCodeWorkspaceId)) {
+      setSelectedCodeWorkspaceId(null);
+    }
+  }, [codeWorkspaceGroups, selectedCodeWorkspaceId]);
+
   const embeddedChatStarterFrame = showEmbeddedChatStarter ? (
     <section className="chat-starter-frame">
       <div className="chat-starter-frame-head">
@@ -1578,41 +1782,64 @@ export default function App() {
   ) : null;
   const isCodeSurfaceRoute =
     route.kind === 'code-start' || (route.kind === 'chat' && activeThreadSurface === 'code');
-  const activeCodePanel = route.kind === 'chat' && activeThreadSurface === 'code'
-    ? activePanel
-    : null;
-  const activeCodeWorkspaceId = useMemo(() => {
-    if (route.kind !== 'chat' || activeThreadSurface !== 'code') return null;
-    const persistedChat = chats.find((chat) => chat.id === route.chatId);
-    if (persistedChat) return deriveWorkspaceFromChat(persistedChat).id;
-    return activeCodePanel?.projectId ?? null;
-  }, [activeCodePanel?.projectId, activeThreadSurface, chats, route]);
   const handleCreateCodeChat = useCallback(() => {
-    const activeWorkspace = activeCodeWorkspaceId
-      ? codeWorkspaceGroups.find((workspace) => workspace.id === activeCodeWorkspaceId)
-      : null;
-
-    if (activeWorkspace) {
-      handleCreateCodeThreadInFolder({ id: activeWorkspace.id, label: activeWorkspace.label });
+    if (selectedCodeWorkspace) {
+      handleCreateCodeThreadInFolder({ id: selectedCodeWorkspace.id, label: selectedCodeWorkspace.label });
       return;
     }
 
-    handleShowCodeStarter();
-  }, [activeCodeWorkspaceId, codeWorkspaceGroups, handleCreateCodeThreadInFolder, handleShowCodeStarter]);
+    void openWorkspaceLauncher();
+  }, [handleCreateCodeThreadInFolder, openWorkspaceLauncher, selectedCodeWorkspace]);
   const isChatRouteActive = route.kind === 'chat-start' || (route.kind === 'chat' && activeThreadSurface === 'chat');
   const isCodeRouteActive = isCodeSurfaceRoute;
-  const showChatHistoryDrawer =
-    !chatLaunchTransition &&
-    isChatSurfaceRoute;
-  const activeChatHistoryId = route.kind === 'chat' && activeThreadSurface === 'chat'
+  const activeChatSidebarId = route.kind === 'chat' && activeThreadSurface === 'chat'
+    ? activePanel?.id ?? route.chatId
+    : null;
+  const activeCodeSidebarChatId = route.kind === 'chat' && activeThreadSurface === 'code'
     ? activePanel?.id ?? route.chatId
     : null;
 
   useEffect(() => {
-    if (!showChatHistoryDrawer && chatHistoryDrawerOpen) {
-      setChatHistoryDrawerOpen(false);
-    }
-  }, [chatHistoryDrawerOpen, showChatHistoryDrawer]);
+    if (!isChatSurfaceRoute) return undefined;
+    if (chatSurfacePanels.length <= 1) return undefined;
+    if (confirmDialog) return undefined;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
+      if (event.defaultPrevented) return;
+
+      let direction = 0;
+      if (event.key === 'ArrowLeft') {
+        direction = -1;
+      } else if (event.key === 'ArrowRight') {
+        direction = 1;
+      }
+
+      if (!direction) return;
+      if (isEditableKeyboardTarget(event.target) && !isChatPanelKeyboardTarget(event.target)) return;
+
+      const fallbackIndex = chatSurfacePanels.length - 1;
+      const anchorId = chatViewportAnchorId ?? chatSurfacePanels[fallbackIndex]?.id ?? null;
+      const anchorIndex = anchorId
+        ? chatSurfacePanels.findIndex((panel) => panel.id === anchorId)
+        : -1;
+      const currentIndex = anchorIndex === -1 ? fallbackIndex : anchorIndex;
+      const nextIndex = Math.max(0, Math.min(chatSurfacePanels.length - 1, currentIndex + direction));
+      if (nextIndex === currentIndex) return;
+
+      event.preventDefault();
+      activatePanel(chatSurfacePanels[nextIndex].id);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    activatePanel,
+    chatSurfacePanels,
+    chatViewportAnchorId,
+    confirmDialog,
+    isChatSurfaceRoute,
+  ]);
 
   useEffect(() => {
     if (!isChatSurfaceRoute && chatStarterVisible) {
@@ -1717,6 +1944,62 @@ export default function App() {
   const defaultModelLabel = resolvedDefaultModel ? getModelDisplayLabel(resolvedDefaultModel) : 'No model ready';
   const defaultReasoningLabel = getReasoningEffortLabel(defaultReasoningEffort);
   const configuredHostedProviders = Number(Boolean(openAIApiKey)) + Number(Boolean(anthropicApiKey));
+  const isMacPlatform = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform);
+  const starterSubmitShortcutKeys = isMacPlatform ? ['Cmd/Ctrl', 'Enter'] : ['Ctrl', 'Enter'];
+  const shortcutInsightGroups: ShortcutInsightGroup[] = [
+    {
+      id: 'navigation',
+      title: 'Tabs',
+      items: [
+        {
+          keys: ['Ctrl', 'Shift', 'Left'],
+          action: 'Show the previous open chat tab',
+        },
+        {
+          keys: ['Ctrl', 'Shift', 'Right'],
+          action: 'Show the next open chat tab',
+        },
+      ],
+    },
+    {
+      id: 'compose',
+      title: 'Chat',
+      items: [
+        {
+          keys: ['Enter'],
+          action: 'Send the current message',
+        },
+        {
+          keys: ['Shift', 'Enter'],
+          action: 'Insert a new line',
+        },
+      ],
+    },
+    {
+      id: 'launchers',
+      title: 'Starters',
+      items: [
+        {
+          keys: starterSubmitShortcutKeys,
+          action: 'Start the drafted chat',
+        },
+      ],
+    },
+    {
+      id: 'dismiss',
+      title: 'Close',
+      items: [
+        {
+          keys: ['Escape'],
+          action: 'Close overlays, panels, or picker menus',
+        },
+      ],
+    },
+  ];
+  const shortcutInsightCount = shortcutInsightGroups.reduce(
+    (total, group) => total + group.items.length,
+    0,
+  );
   const settingsTabs = [
     {
       id: 'workspace' as const,
@@ -1740,6 +2023,13 @@ export default function App() {
       summary: `${chats.length} chats · ${projectFolders.length} workspaces`,
     },
     {
+      id: 'shortcuts' as const,
+      label: SETTINGS_TAB_META.shortcuts.label,
+      title: SETTINGS_TAB_META.shortcuts.title,
+      description: SETTINGS_TAB_META.shortcuts.description,
+      summary: `${shortcutInsightCount} live shortcuts`,
+    },
+    {
       id: 'advanced' as const,
       label: SETTINGS_TAB_META.advanced.label,
       title: SETTINGS_TAB_META.advanced.title,
@@ -1748,56 +2038,57 @@ export default function App() {
     },
   ];
   const activeSettingsTabMeta = settingsTabs.find((tab) => tab.id === settingsTab) ?? settingsTabs[0];
+  const localPersistenceLabel = DESKTOP_RUNTIME ? 'local app database' : 'browser';
+  const storageSystemLabel = DESKTOP_RUNTIME ? 'local SQL database' : 'IndexedDB';
+  const storageMeterLabel = DESKTOP_RUNTIME ? 'Local SQL database' : 'Browser storage';
 
   const applyOllamaEndpoint = useCallback(() => {
-    const next = persistOllamaBase(ollamaEndpointDraft);
+    const next = normalizeOllamaBase(ollamaEndpointDraft);
     setOllamaEndpoint(next);
     setOllamaEndpointDraft(next);
     toast(`Ollama endpoint set to ${next}`);
   }, [ollamaEndpointDraft, toast]);
 
   const resetOllamaEndpoint = useCallback(() => {
-    const next = persistOllamaBase(DEFAULT_OLLAMA_BASE);
+    const next = normalizeOllamaBase(DEFAULT_OLLAMA_BASE);
     setOllamaEndpoint(next);
     setOllamaEndpointDraft(next);
     toast('Ollama endpoint reset to the default local address.');
   }, [toast]);
 
   const applyOpenAIKey = useCallback(() => {
-    const next = persistOpenAIApiKey(openAIApiKeyDraft);
+    const next = openAIApiKeyDraft.trim();
     setOpenAIApiKey(next);
-    toast(next ? 'OpenAI API key saved for this browser.' : 'OpenAI API key removed.');
-  }, [openAIApiKeyDraft, toast]);
+    toast(next ? `OpenAI API key saved to the ${localPersistenceLabel}.` : 'OpenAI API key removed.');
+  }, [localPersistenceLabel, openAIApiKeyDraft, toast]);
 
   const clearOpenAIKey = useCallback(() => {
-    persistOpenAIApiKey('');
     setOpenAIApiKey('');
     setOpenAIApiKeyDraft('');
     toast('OpenAI API key cleared.');
   }, [toast]);
 
   const useSampleOpenAIKey = useCallback(() => {
-    const next = persistOpenAIApiKey(OPENAI_UI_SAMPLE_KEY);
+    const next = OPENAI_UI_SAMPLE_KEY;
     setOpenAIApiKey(next);
     setOpenAIApiKeyDraft(next);
     toast('OpenAI sample UI key applied.');
   }, [toast]);
 
   const applyAnthropicKey = useCallback(() => {
-    const next = persistAnthropicApiKey(anthropicApiKeyDraft);
+    const next = anthropicApiKeyDraft.trim();
     setAnthropicApiKey(next);
-    toast(next ? 'Anthropic API key saved for this browser.' : 'Anthropic API key removed.');
-  }, [anthropicApiKeyDraft, toast]);
+    toast(next ? `Anthropic API key saved to the ${localPersistenceLabel}.` : 'Anthropic API key removed.');
+  }, [anthropicApiKeyDraft, localPersistenceLabel, toast]);
 
   const clearAnthropicKey = useCallback(() => {
-    persistAnthropicApiKey('');
     setAnthropicApiKey('');
     setAnthropicApiKeyDraft('');
     toast('Anthropic API key cleared.');
   }, [toast]);
 
   const useSampleAnthropicKey = useCallback(() => {
-    const next = persistAnthropicApiKey(ANTHROPIC_UI_SAMPLE_KEY);
+    const next = ANTHROPIC_UI_SAMPLE_KEY;
     setAnthropicApiKey(next);
     setAnthropicApiKeyDraft(next);
     toast('Anthropic sample UI key applied.');
@@ -1846,48 +2137,21 @@ export default function App() {
     URL.revokeObjectURL(anchor.href);
     toast(`Downloaded ${fileName}`);
   }, [deepResearchSearchTestResult, toast]);
-  const chatHistoryBytes = ready ? measureJsonBytes(chats) : 0;
-  const workspaceStorageBytes = estimateLocalStorageEntryBytes(
-    FOLDERS_STORAGE_KEY,
-    JSON.stringify(projectFolders),
-  );
-  const defaultModelStorageBytes = defaultModel
-    ? estimateLocalStorageEntryBytes(DEFAULT_MODEL_STORAGE_KEY, defaultModel)
-    : 0;
-  const defaultChatPresetStorageBytes = defaultChatPreset !== DEFAULT_PRESET_ID
-    ? estimateLocalStorageEntryBytes(DEFAULT_CHAT_PRESET_STORAGE_KEY, defaultChatPreset)
-    : 0;
-  const defaultReasoningStorageBytes = defaultReasoningEffort !== DEFAULT_REASONING_EFFORT
-    ? estimateLocalStorageEntryBytes(DEFAULT_REASONING_STORAGE_KEY, defaultReasoningEffort)
-    : 0;
-  const developerToolsStorageBytes = developerToolsEnabled
-    ? estimateLocalStorageEntryBytes(DEVELOPER_TOOLS_STORAGE_KEY, '1')
-    : 0;
-  const advancedUseStorageBytes = advancedUseEnabled
-    ? estimateLocalStorageEntryBytes(ADVANCED_USE_STORAGE_KEY, '1')
-    : 0;
-  const providerConnectionStorageBytes =
-    (ollamaEndpoint !== DEFAULT_OLLAMA_BASE
-      ? estimateLocalStorageEntryBytes(OLLAMA_BASE_STORAGE_KEY, ollamaEndpoint)
-      : 0) +
-    (openAIApiKey
-      ? estimateLocalStorageEntryBytes(OPENAI_API_KEY_STORAGE_KEY, openAIApiKey)
-      : 0) +
-    (anthropicApiKey
-      ? estimateLocalStorageEntryBytes(ANTHROPIC_API_KEY_STORAGE_KEY, anthropicApiKey)
-      : 0);
-  const workspaceDefaultStorageBytes =
-    defaultModelStorageBytes +
-    defaultChatPresetStorageBytes +
-    defaultReasoningStorageBytes +
-    developerToolsStorageBytes +
-    advancedUseStorageBytes;
-  const replyPreferenceStorageBytes = replyPreferences.length
-    ? estimateLocalStorageEntryBytes(
-        REPLY_PREFERENCES_STORAGE_KEY,
-        JSON.stringify(replyPreferences),
-      )
-    : 0;
+  const chatHistoryBytes = ready ? measurePersistedBytes(chats) : 0;
+  const workspaceStorageBytes = measurePersistedBytes(projectFolders);
+  const workspaceDefaultStorageBytes = measurePersistedBytes({
+    defaultModel: defaultModel || undefined,
+    defaultChatPreset: defaultChatPreset !== DEFAULT_PRESET_ID ? defaultChatPreset : undefined,
+    defaultReasoningEffort: defaultReasoningEffort !== DEFAULT_REASONING_EFFORT ? defaultReasoningEffort : undefined,
+    developerToolsEnabled: developerToolsEnabled || undefined,
+    advancedUseEnabled: advancedUseEnabled || undefined,
+  });
+  const providerConnectionStorageBytes = measurePersistedBytes({
+    ollamaEndpoint: ollamaEndpoint !== DEFAULT_OLLAMA_BASE ? ollamaEndpoint : undefined,
+    openAIApiKey: openAIApiKey || undefined,
+    anthropicApiKey: anthropicApiKey || undefined,
+  });
+  const replyPreferenceStorageBytes = measurePersistedBytes(replyPreferences);
   const likedReplyPreferenceCount = replyPreferences.filter((entry) => entry.feedback === 'liked').length;
   const dislikedReplyPreferenceCount = replyPreferences.filter((entry) => entry.feedback === 'disliked').length;
   const customPresetStorage = getCustomPresetStorageUsage();
@@ -1904,8 +2168,8 @@ export default function App() {
       label: 'Chat history',
       bytes: chatHistoryBytes,
       note: ready
-        ? `${chats.length} saved chat${chats.length !== 1 ? 's' : ''} in IndexedDB`
-        : 'Reading saved chats from IndexedDB...',
+        ? `${chats.length} saved chat${chats.length !== 1 ? 's' : ''} in ${storageSystemLabel}`
+        : `Reading saved chats from ${storageSystemLabel}...`,
       color: '#5ea7ff',
     },
     {
@@ -1938,7 +2202,7 @@ export default function App() {
       label: 'Reply preferences',
       bytes: replyPreferenceStorageBytes,
       note: replyPreferences.length
-        ? `${replyPreferences.length} rated repl${replyPreferences.length === 1 ? 'y' : 'ies'} stored locally (${likedReplyPreferenceCount} liked, ${dislikedReplyPreferenceCount} disliked)`
+        ? `${replyPreferences.length} rated repl${replyPreferences.length === 1 ? 'y' : 'ies'} stored in the ${localPersistenceLabel} (${likedReplyPreferenceCount} liked, ${dislikedReplyPreferenceCount} disliked)`
         : 'No reply feedback memory stored yet',
       color: '#7c8cff',
     },
@@ -1953,6 +2217,7 @@ export default function App() {
     },
   ];
   const appQuotaRatio =
+    !DESKTOP_RUNTIME &&
     browserStorage.supported &&
     browserStorage.quota != null &&
     browserStorage.quota > 0
@@ -1970,12 +2235,7 @@ export default function App() {
       ? `max(${appQuotaRatio}%, ${storageMeterMinimumWidthPx}px)`
       : '0%';
   const hoveredStorageBucket = storageMeterSegments.find((bucket) => bucket.id === hoveredStorageBucketId) ?? null;
-  const chatOverviewShortcutLabel =
-    typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
-      ? 'Cmd + Shift + O'
-      : 'Ctrl + Shift + O';
   const handleShowChatStarter = useCallback(() => {
-    setChatHistoryDrawerOpen(false);
     setChatLaunchTransition(null);
     setChatStarterVisible(true);
     const existingStarterPanel = chatStarterPanelId
@@ -1997,22 +2257,18 @@ export default function App() {
     setChatStarterPanelId(starterPanelId);
     navigate(buildChatPath(starterPanelId));
   }, [chatStarterPanelId, defaultChatPreset, defaultReasoningEffort, navigate, openDraftChat, panels]);
-
-  useEffect(() => {
-    if (!showChatHistoryDrawer) return undefined;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (isEditableTarget(event.target)) return;
-      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
-      if (event.key.toLowerCase() !== 'o') return;
-
-      event.preventDefault();
-      setChatHistoryDrawerOpen((current) => !current);
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showChatHistoryDrawer]);
+  const chatSidebar = (
+    <Sidebar
+      mode="chat"
+      chats={chatSurfaceChats}
+      activeChatId={activeChatSidebarId}
+      openPanelIds={chatSurfaceOpenPanelIds}
+      onCreateChat={handleShowChatStarter}
+      onOpenChat={handleOpenFromHistory}
+      onDeleteChat={requestDeleteChat}
+      onOpenSettings={() => navigate('/settings')}
+    />
+  );
 
   return (
     <div id="app">
@@ -2037,11 +2293,9 @@ export default function App() {
         style={{ display: 'none' }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          const labelOverride = workspaceDraftName.trim();
           e.target.value = '';
           if (!files.length) return;
-          closeWorkspaceLauncher();
-          void handleImportDirectory(files, undefined, labelOverride || undefined);
+          void handleImportDirectory(files);
         }}
       />
 
@@ -2071,40 +2325,6 @@ export default function App() {
               Code
             </button>
           </div>
-
-          <div className="route-header-meta">
-            {showChatHistoryDrawer && (
-              <button
-                type="button"
-                className={`route-icon-link route-history-trigger${chatHistoryDrawerOpen ? ' active open' : ''}`}
-                onClick={() => setChatHistoryDrawerOpen((current) => !current)}
-                aria-label={chatHistoryDrawerOpen ? 'Close chat history' : 'Open chat history'}
-                aria-keyshortcuts="Control+Shift+O Meta+Shift+O"
-                title={`${chatHistoryDrawerOpen ? 'Close chat history' : 'Open chat history'} (${chatOverviewShortcutLabel})`}
-              >
-                <span className="route-history-trigger-stack" aria-hidden="true">
-                  <span className="route-history-trigger-icon primary">
-                    <IconMessageSquare size={16} />
-                  </span>
-                  <span className="route-history-trigger-icon secondary">
-                    <IconX size={15} />
-                  </span>
-                </span>
-                <span className="route-history-trigger-label">Chats</span>
-                <span className="route-history-trigger-count">
-                  {chatSurfaceChats.length}
-                </span>
-              </button>
-            )}
-            <button
-              className={`route-icon-link${route.kind === 'settings' ? ' active' : ''}`}
-              onClick={() => navigate('/settings')}
-              title="Settings"
-              aria-label="Settings"
-            >
-              <IconSettings size={16} />
-            </button>
-          </div>
         </header>
 
         <div id="main-content">
@@ -2113,8 +2333,8 @@ export default function App() {
               <div className="settings-stage">
                 <div className="settings-header">
                     <span className="settings-eyebrow">Settings</span>
-                    <h2>Workspace defaults</h2>
-                    <p>Pick the defaults for new chats, manage providers, and adjust local app behavior without the extra noise.</p>
+                    <h2>Workspace controls</h2>
+                    <p>Pick defaults for new chats, manage providers, review local data, and keep the app&apos;s shortcut system easy to discover.</p>
 
                   <div className="settings-overview-grid">
                     <article className="settings-overview-card">
@@ -2273,15 +2493,11 @@ export default function App() {
 
                             <div className="settings-stack">
                               <strong>Workspaces</strong>
-                              <p className="settings-inline-note">Create a blank workspace or import a local folder before starting code or debug threads.</p>
+                              <p className="settings-inline-note">Add a real local folder before starting code threads so the sidebar can manage that workspace directly.</p>
                               <div className="settings-actions">
-                                <button className="btn" onClick={() => openWorkspaceLauncher('create')}>
+                                <button className="btn" onClick={() => void openWorkspaceLauncher()}>
                                   <IconFolderPlus size={14} />
-                                  New Workspace
-                                </button>
-                                <button className="btn settings-secondary-btn" onClick={() => openWorkspaceLauncher('import')}>
-                                  <IconUpload size={14} />
-                                  Import Folder
+                                  Add workspace folder
                                 </button>
                               </div>
                             </div>
@@ -2444,7 +2660,7 @@ export default function App() {
                           </label>
 
                           <p className="settings-inline-note">
-                            Saved locally in this browser. Use <code>{OPENAI_UI_SAMPLE_KEY}</code> if you only need the catalog visible for UI testing.
+                            Saved in the {localPersistenceLabel}. Use <code>{OPENAI_UI_SAMPLE_KEY}</code> if you only need the catalog visible for UI testing.
                           </p>
 
                           <div className="settings-actions">
@@ -2487,7 +2703,7 @@ export default function App() {
                           </label>
 
                           <p className="settings-inline-note">
-                            Saved locally in this browser. Use <code>{ANTHROPIC_UI_SAMPLE_KEY}</code> if you only need the Claude catalog unlocked for UI testing.
+                            Saved in the {localPersistenceLabel}. Use <code>{ANTHROPIC_UI_SAMPLE_KEY}</code> if you only need the Claude catalog unlocked for UI testing.
                           </p>
 
                           <div className="settings-actions">
@@ -2512,19 +2728,19 @@ export default function App() {
                         <article className="settings-card settings-summary-card">
                           <span className="settings-card-kicker">Chats</span>
                           <strong>{chats.length}</strong>
-                          <p>Saved conversations in IndexedDB.</p>
+                          <p>Saved conversations in the {storageSystemLabel}.</p>
                         </article>
 
                         <article className="settings-card settings-summary-card">
                           <span className="settings-card-kicker">Workspaces</span>
                           <strong>{projectFolders.length}</strong>
-                          <p>Workspace entries stored locally.</p>
+                          <p>Workspace entries stored in the {localPersistenceLabel}.</p>
                         </article>
 
                         <article className="settings-card settings-summary-card">
                           <span className="settings-card-kicker">Reply memory</span>
                           <strong>{replyPreferences.length}</strong>
-                          <p>Liked and disliked response examples saved for future prompts.</p>
+                          <p>Liked and disliked response examples saved in the {localPersistenceLabel} for future prompts.</p>
                         </article>
                       </div>
 
@@ -2544,7 +2760,7 @@ export default function App() {
                         <div className="settings-storage">
                           <div className="settings-storage-meter-block">
                             <div className="settings-storage-meter-head">
-                              <span className="settings-storage-meter-label">Browser Storage</span>
+                              <span className="settings-storage-meter-label">{storageMeterLabel}</span>
                               <span className="settings-storage-meter-total">
                                 {browserStorage.supported && browserStorage.quota != null
                                   ? `${formatStorageSize(appStorageBytes)} of ${formatStorageSize(browserStorage.quota)}`
@@ -2557,7 +2773,7 @@ export default function App() {
                               onMouseEnter={cancelStoragePopupHide}
                               onMouseLeave={scheduleStoragePopupHide}
                             >
-                              <div className="settings-storage-meter" role="list" aria-label="Larry AI browser storage breakdown">
+                              <div className="settings-storage-meter" role="list" aria-label={`Larry AI ${storageMeterLabel.toLowerCase()} breakdown`}>
                                 {appStorageBytes > 0 ? (
                                   <div className="settings-storage-meter-used" style={{ width: browserStorageBarWidth }}>
                                     {storageMeterSegments.map((bucket) => (
@@ -2616,7 +2832,9 @@ export default function App() {
                             <div className="settings-storage-meter-caption">
                               {appQuotaRatio != null
                                 ? `Larry AI is using about ${formatStoragePercent(appQuotaRatio)} of the browser storage limit. Hover a color segment to inspect what each category stores.`
-                                : 'Quota details are not exposed in this environment.'}
+                                : DESKTOP_RUNTIME
+                                  ? 'Storage is tracked in the desktop database file, so browser quota limits do not apply here.'
+                                  : 'Quota details are not exposed in this environment.'}
                             </div>
                           </div>
 
@@ -2684,7 +2902,7 @@ export default function App() {
 
                           <p className="settings-inline-note">
                             {replyPreferences.length
-                              ? `${likedReplyPreferenceCount} liked and ${dislikedReplyPreferenceCount} disliked examples are stored locally for better future replies.`
+                              ? `${likedReplyPreferenceCount} liked and ${dislikedReplyPreferenceCount} disliked examples are stored in the ${localPersistenceLabel} for better future replies.`
                               : 'No reply memory is stored yet.'}
                           </p>
 
@@ -2708,7 +2926,7 @@ export default function App() {
                             </div>
                           </div>
 
-                          <p className="settings-inline-note">Remove every saved conversation from this browser. This cannot be undone.</p>
+                          <p className="settings-inline-note">Remove every saved conversation from the {localPersistenceLabel}. This cannot be undone.</p>
 
                           <div className="settings-actions">
                             <button className="btn danger settings-danger-btn" onClick={requestClearAll}>
@@ -2719,6 +2937,47 @@ export default function App() {
                         </section>
                       </div>
                     </>
+                  )}
+
+                  {settingsTab === 'shortcuts' && (
+                    <div className="settings-card-grid settings-card-grid-two">
+                      {shortcutInsightGroups.map((group) => (
+                        <section key={group.id} className="settings-card settings-card-spacious">
+                          <div className="settings-card-head">
+                            <div>
+                              <span className="settings-card-kicker">Shortcuts</span>
+                              <h4>{group.title}</h4>
+                            </div>
+                          </div>
+
+                          <div className="settings-shortcut-list">
+                            {group.items.map((shortcut) => (
+                              <article
+                                key={`${group.id}-${shortcut.action}`}
+                                className="settings-shortcut-item"
+                              >
+                                <div className="settings-shortcut-keys" aria-label={`Shortcut ${shortcut.keys.join(' plus ')}`}>
+                                  {shortcut.keys.map((key, index) => (
+                                    <span key={`${shortcut.action}-${key}-${index}`} className="settings-shortcut-key-wrap">
+                                      {index > 0 ? (
+                                        <span className="settings-shortcut-plus" aria-hidden="true">
+                                          +
+                                        </span>
+                                      ) : null}
+                                      <kbd className="settings-shortcut-key">{key}</kbd>
+                                    </span>
+                                  ))}
+                                </div>
+
+                                <div className="settings-shortcut-copy">
+                                  <strong>{shortcut.action}</strong>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
                   )}
 
                   {settingsTab === 'advanced' && (
@@ -2934,61 +3193,75 @@ export default function App() {
               onGoToCode={() => navigate('/code')}
             />
           ) : route.kind === 'chat-start' ? (
-            <div id="workspace" className="chat-route-workspace chat-root-workspace">
-              <div id="panels-area" className={`chat-panel-strip panels-${chatDisplayFrameCount}`}>
-                {chatDisplayPanels.map((panel) => (
-                  <ChatPanel
-                    key={panel.id}
-                    panel={panel}
-                    models={models}
-                    showDeveloperTools={developerToolsEnabled}
-                    showAdvancedUse={advancedUseEnabled}
-                    onUpdate={updatePanel}
-                    onClose={closePanel}
-                    onSave={savePanel}
-                    selected={activePanelId === panel.id}
-                    onActivate={activatePanel}
-                    launchPrompt={queuedLaunchPrompts[panel.id] ?? null}
-                    onConsumeLaunchPrompt={consumeLaunchPrompt}
-                    onImportWorkspaceFiles={(files) => {
-                      if (!panel.projectId || !panel.projectLabel) return;
-                      void handleImportDirectory(files, {
-                        id: panel.projectId,
-                        label: panel.projectLabel,
-                      });
-                    }}
-                  />
-                ))}
+            <div className="workbench-route-shell chat-route-shell">
+              {chatSidebar}
+              <div className="workbench-route-main">
+                <div id="workspace" className="chat-route-workspace chat-root-workspace">
+                  <div id="panels-area" className={`chat-panel-strip panels-${chatDisplayFrameCount}`}>
+                    {chatDisplayPanels.map((panel) => (
+                      <ChatPanel
+                        key={panel.id}
+                        panel={panel}
+                        models={models}
+                        showDeveloperTools={developerToolsEnabled}
+                        showAdvancedUse={advancedUseEnabled}
+                        onUpdate={updatePanel}
+                        onClose={closePanel}
+                        onSave={savePanel}
+                        selected={activePanelId === panel.id}
+                        onActivate={activatePanel}
+                        launchPrompt={queuedLaunchPrompts[panel.id] ?? null}
+                        onConsumeLaunchPrompt={consumeLaunchPrompt}
+                        onImportWorkspaceFiles={(files) => {
+                          if (!panel.projectId || !panel.projectLabel) return;
+                          void handleImportDirectory(files, {
+                            id: panel.projectId,
+                            label: panel.projectLabel,
+                          });
+                        }}
+                      />
+                    ))}
 
-                {embeddedChatStarterFrame}
+                    {embeddedChatStarterFrame}
+                  </div>
+                </div>
               </div>
             </div>
           ) : route.kind === 'code-start' ? (
             <div className="workbench-route-shell code-route-shell">
               <Sidebar
+                mode="code"
                 workspaces={codeWorkspaceGroups}
-                activeWorkspaceId={null}
-                onCreateWorkspace={() => openWorkspaceLauncher('create')}
+                activeWorkspaceId={selectedCodeWorkspaceId}
+                activeChatId={null}
+                onCreateWorkspace={() => void openWorkspaceLauncher()}
+                onSelectWorkspace={handleSelectCodeWorkspace}
+                onClearActiveWorkspace={handleClearSelectedCodeWorkspace}
                 onCreateChat={handleCreateCodeChat}
-                onOpenWorkspace={handleOpenCodeWorkspace}
+                onOpenChat={handleOpenFromHistory}
+                onDeleteChat={requestDeleteChat}
+                onRenameWorkspace={handleRenameWorkspace}
+                onArchiveWorkspace={requestArchiveWorkspace}
+                onOpenWorkspaceInExplorer={handleOpenWorkspaceInExplorer}
+                onRefreshWorkspace={handleRefreshWorkspace}
                 onOpenSettings={() => navigate('/settings')}
               />
               <div className="workbench-route-main">
                 <div className="code-workbench-stage">
-                  <PromptLibraryView
-                    page="code"
-                    chats={codeSurfaceChats}
-                    folders={projectFolders}
-                    defaultModel={resolvedDefaultModel}
-                    defaultChatPreset={defaultChatPreset}
-                    defaultReasoningEffort={defaultReasoningEffort}
-                    models={models}
-                    onStartChat={handleStartChatFromHome}
+                  <CodeWorkspaceStage
+                    workspace={selectedCodeWorkspace}
+                    onCreateChat={handleCreateCodeChat}
                     onOpenChat={handleOpenFromHistory}
-                    onCreateChatInFolder={handleCreateCodeThreadInFolder}
-                    onOpenWorkspaceLauncher={openWorkspaceLauncher}
-                    onDeleteChat={requestDeleteChat}
-                    onDeleteWorkspace={requestDeleteWorkspace}
+                    onRefreshWorkspace={() => {
+                      if (selectedCodeWorkspace) {
+                        handleRefreshWorkspace(selectedCodeWorkspace);
+                      }
+                    }}
+                    onOpenInExplorer={() => {
+                      if (selectedCodeWorkspace) {
+                        void handleOpenWorkspaceInExplorer(selectedCodeWorkspace);
+                      }
+                    }}
                   />
                 </div>
               </div>
@@ -3009,11 +3282,20 @@ export default function App() {
           ) : isCodeSurfaceRoute ? (
             <div className="workbench-route-shell code-route-shell">
               <Sidebar
+                mode="code"
                 workspaces={codeWorkspaceGroups}
-                activeWorkspaceId={activeCodeWorkspaceId}
-                onCreateWorkspace={() => openWorkspaceLauncher('create')}
+                activeWorkspaceId={selectedCodeWorkspaceId}
+                activeChatId={activeCodeSidebarChatId}
+                onCreateWorkspace={() => void openWorkspaceLauncher()}
+                onSelectWorkspace={handleSelectCodeWorkspace}
+                onClearActiveWorkspace={handleClearSelectedCodeWorkspace}
                 onCreateChat={handleCreateCodeChat}
-                onOpenWorkspace={handleOpenCodeWorkspace}
+                onOpenChat={handleOpenFromHistory}
+                onDeleteChat={requestDeleteChat}
+                onRenameWorkspace={handleRenameWorkspace}
+                onArchiveWorkspace={requestArchiveWorkspace}
+                onOpenWorkspaceInExplorer={handleOpenWorkspaceInExplorer}
+                onRefreshWorkspace={handleRefreshWorkspace}
                 onOpenSettings={() => navigate('/settings')}
               />
               <div className="workbench-route-main">
@@ -3051,7 +3333,7 @@ export default function App() {
                       <p>
                         {isMissingChatRoute
                           ? 'That route does not match a saved code chat. Start a new prompt or reopen one from the sidebar.'
-                          : 'Loading the requested local chat from IndexedDB.'}
+                          : `Loading the requested local chat from ${storageSystemLabel}.`}
                       </p>
                       <button className="btn" onClick={() => navigate('/code')}>
                         Return to code
@@ -3062,51 +3344,56 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div id="workspace" className="chat-route-workspace">
-              {chatDisplayPanels.length || showEmbeddedChatStarter ? (
-                <div id="panels-area" className={`chat-panel-strip panels-${chatDisplayFrameCount}`}>
-                  {chatDisplayPanels.map((panel) => (
-                    <ChatPanel
-                      key={panel.id}
-                      panel={panel}
-                      models={models}
-                      showDeveloperTools={developerToolsEnabled}
-                      showAdvancedUse={advancedUseEnabled}
-                      onUpdate={updatePanel}
-                      onClose={closePanel}
-                      onSave={savePanel}
-                      selected={activePanelId === panel.id}
-                      onActivate={activatePanel}
-                      launchPrompt={queuedLaunchPrompts[panel.id] ?? null}
-                      onConsumeLaunchPrompt={consumeLaunchPrompt}
-                      onImportWorkspaceFiles={(files) => {
-                        if (!panel.projectId || !panel.projectLabel) return;
-                        void handleImportDirectory(files, {
-                          id: panel.projectId,
-                          label: panel.projectLabel,
-                        });
-                      }}
-                    />
-                  ))}
+            <div className="workbench-route-shell chat-route-shell">
+              {chatSidebar}
+              <div className="workbench-route-main">
+                <div id="workspace" className="chat-route-workspace">
+                  {chatDisplayPanels.length || showEmbeddedChatStarter ? (
+                    <div id="panels-area" className={`chat-panel-strip panels-${chatDisplayFrameCount}`}>
+                      {chatDisplayPanels.map((panel) => (
+                        <ChatPanel
+                          key={panel.id}
+                          panel={panel}
+                          models={models}
+                          showDeveloperTools={developerToolsEnabled}
+                          showAdvancedUse={advancedUseEnabled}
+                          onUpdate={updatePanel}
+                          onClose={closePanel}
+                          onSave={savePanel}
+                          selected={activePanelId === panel.id}
+                          onActivate={activatePanel}
+                          launchPrompt={queuedLaunchPrompts[panel.id] ?? null}
+                          onConsumeLaunchPrompt={consumeLaunchPrompt}
+                          onImportWorkspaceFiles={(files) => {
+                            if (!panel.projectId || !panel.projectLabel) return;
+                            void handleImportDirectory(files, {
+                              id: panel.projectId,
+                              label: panel.projectLabel,
+                            });
+                          }}
+                        />
+                      ))}
 
-                  {embeddedChatStarterFrame}
+                      {embeddedChatStarterFrame}
+                    </div>
+                  ) : (
+                    <div id="no-panels" className="route-state">
+                      <div style={{ fontSize: 56, opacity: 0.12, color: 'var(--accent)' }}>
+                        <IconHexagon size={72} />
+                      </div>
+                      <h2>{isMissingChatRoute ? 'Chat not found' : 'Opening chat'}</h2>
+                      <p>
+                        {isMissingChatRoute
+                          ? 'That route does not match a saved local chat. Start a new prompt or reopen one from the sidebar.'
+                          : `Loading the requested local chat from ${storageSystemLabel}.`}
+                      </p>
+                      <button className="btn" onClick={() => navigate('/chat')}>
+                        Return to chat
+                      </button>
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div id="no-panels" className="route-state">
-                  <div style={{ fontSize: 56, opacity: 0.12, color: 'var(--accent)' }}>
-                    <IconHexagon size={72} />
-                  </div>
-                  <h2>{isMissingChatRoute ? 'Chat not found' : 'Opening chat'}</h2>
-                  <p>
-                    {isMissingChatRoute
-                      ? 'That route does not match a saved local chat. Start a new prompt or open one from the library.'
-                      : 'Loading the requested local chat from IndexedDB.'}
-                  </p>
-                  <button className="btn" onClick={() => navigate('/')}>
-                    Go home
-                  </button>
-                </div>
-              )}
+              </div>
             </div>
           )}
         </div>
@@ -3127,141 +3414,6 @@ export default function App() {
             launchPrompt={queuedLaunchPrompts[pendingChatLaunchPanel.id] ?? null}
             onConsumeLaunchPrompt={consumeLaunchPrompt}
           />
-        </div>
-      )}
-
-      {showChatHistoryDrawer && chatHistoryDrawerOpen && (
-        <ChatHistoryDrawer
-          chats={chatSurfaceChats}
-          openPanelIds={chatSurfaceOpenPanelIds}
-          activeChatId={activeChatHistoryId}
-          anchoredToHeader={true}
-          shortcutLabel={chatOverviewShortcutLabel}
-          onOpen={(chat) => {
-            handleOpenFromHistory(chat);
-            setChatHistoryDrawerOpen(false);
-          }}
-          onCreateNewConversation={handleShowChatStarter}
-          onDelete={requestDeleteChat}
-          onClose={() => setChatHistoryDrawerOpen(false)}
-        />
-      )}
-
-      {workspaceLauncherOpen && (
-        <div className="workspace-launcher-backdrop" onClick={closeWorkspaceLauncher}>
-          <div className="workspace-launcher-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="workspace-launcher-head">
-              <div
-                className="workspace-launcher-toggle"
-                data-mode={workspaceLauncherMode}
-              >
-                <span className="workspace-launcher-toggle-glider" />
-                <button
-                  className={`workspace-launcher-tab${workspaceLauncherMode === 'create' ? ' active' : ''}`}
-                  onClick={() => setWorkspaceLauncherMode('create')}
-                >
-                  New workspace
-                </button>
-                <button
-                  className={`workspace-launcher-tab${workspaceLauncherMode === 'import' ? ' active' : ''}`}
-                  onClick={() => setWorkspaceLauncherMode('import')}
-                >
-                  Import folder
-                </button>
-              </div>
-
-              <button
-                className="workspace-launcher-close"
-                onClick={closeWorkspaceLauncher}
-                title="Close workspace launcher"
-              >
-                <IconX size={14} />
-              </button>
-            </div>
-
-            <div
-              className="workspace-launcher-stage"
-              data-mode={workspaceLauncherMode}
-            >
-              <div className="workspace-launcher-track">
-                <section className="workspace-launcher-panel">
-                  <div className="workspace-launcher-hero">
-                    <span className="workspace-launcher-icon">
-                      <IconFolderPlus size={18} />
-                    </span>
-                    <div className="workspace-launcher-copy">
-                      <h2>Create a workspace</h2>
-                      <p>Name the workspace first. Chats and project files will live inside it.</p>
-                    </div>
-                  </div>
-
-                  <label className="workspace-launcher-field">
-                    <span>Workspace name</span>
-                    <input
-                      className="workspace-launcher-input"
-                      value={workspaceDraftName}
-                      onChange={(e) => setWorkspaceDraftName(e.target.value)}
-                      placeholder="Enterprise Portal"
-                    />
-                  </label>
-
-                  <div className="workspace-launcher-actions">
-                    <button className="workspace-launcher-btn" onClick={closeWorkspaceLauncher}>
-                      Cancel
-                    </button>
-                    <button
-                      className="workspace-launcher-btn primary"
-                      onClick={() => {
-                        if (handleCreateFolder(workspaceDraftName)) {
-                          closeWorkspaceLauncher();
-                        }
-                      }}
-                    >
-                      Create workspace
-                    </button>
-                  </div>
-                </section>
-
-                <section className="workspace-launcher-panel">
-                  <div className="workspace-launcher-hero">
-                    <span className="workspace-launcher-icon">
-                      <IconUpload size={18} />
-                    </span>
-                    <div className="workspace-launcher-copy">
-                      <h2>Import a project folder</h2>
-                      <p>Select a file directory and Larry AI will build the workspace from it.</p>
-                    </div>
-                  </div>
-
-                  <label className="workspace-launcher-field">
-                    <span>Workspace name override</span>
-                    <input
-                      className="workspace-launcher-input"
-                      value={workspaceDraftName}
-                      onChange={(e) => setWorkspaceDraftName(e.target.value)}
-                      placeholder="Optional - use folder name by default"
-                    />
-                  </label>
-
-                  <p className="workspace-launcher-note">
-                    Leave the name blank to use the selected directory name automatically.
-                  </p>
-
-                  <div className="workspace-launcher-actions">
-                    <button className="workspace-launcher-btn" onClick={closeWorkspaceLauncher}>
-                      Cancel
-                    </button>
-                    <button
-                      className="workspace-launcher-btn primary"
-                      onClick={() => importWorkspaceLauncherRef.current?.click()}
-                    >
-                      Select directory
-                    </button>
-                  </div>
-                </section>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 

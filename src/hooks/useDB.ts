@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { initDB, loadAllChats, saveChat, deleteChat } from '../lib/db';
+import { loadChats, saveChat, removeChat, clearChats } from '../lib/persistence';
 import type { ChatRecord } from '../types';
 
 export function useDB() {
@@ -7,14 +7,22 @@ export function useDB() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    initDB().then(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const nextChats = await loadChats();
+      if (cancelled) return;
+      setChats(nextChats);
       setReady(true);
-      loadAllChats().then(setChats);
-    });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const refresh = useCallback(async () => {
-    const all = await loadAllChats();
+    const all = await loadChats();
     setChats(all);
   }, []);
 
@@ -24,13 +32,12 @@ export function useDB() {
   }, [refresh]);
 
   const remove = useCallback(async (id: string) => {
-    await deleteChat(id);
+    await removeChat(id);
     await refresh();
   }, [refresh]);
 
   const clearAll = useCallback(async () => {
-    const all = await loadAllChats();
-    for (const c of all) await deleteChat(c.id);
+    await clearChats();
     await refresh();
   }, [refresh]);
 

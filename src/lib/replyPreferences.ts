@@ -1,3 +1,4 @@
+import { loadReplyPreferences as loadStoredReplyPreferences, replaceReplyPreferences } from './persistence';
 import type { ReplyPreferenceRecord, ThreadType } from '../types';
 
 export const REPLY_PREFERENCES_STORAGE_KEY = 'larry_reply_preferences_v1';
@@ -25,7 +26,7 @@ function stableHash(text: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function parseReplyPreferences(value: string | null): ReplyPreferenceRecord[] {
+export function parseReplyPreferences(value: string | null): ReplyPreferenceRecord[] {
   if (!value) return [];
 
   try {
@@ -43,10 +44,13 @@ function parseReplyPreferences(value: string | null): ReplyPreferenceRecord[] {
   }
 }
 
-function persistReplyPreferences(next: ReplyPreferenceRecord[]): ReplyPreferenceRecord[] {
-  if (typeof window === 'undefined') return next;
-  localStorage.setItem(REPLY_PREFERENCES_STORAGE_KEY, JSON.stringify(next));
-  window.dispatchEvent(new Event(REPLY_PREFERENCES_UPDATED_EVENT));
+async function persistReplyPreferences(next: ReplyPreferenceRecord[]): Promise<ReplyPreferenceRecord[]> {
+  await replaceReplyPreferences(next);
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(REPLY_PREFERENCES_UPDATED_EVENT));
+  }
+
   return next;
 }
 
@@ -92,16 +96,14 @@ export function buildReplyPreferenceId(input: {
   return `replypref_${stableHash(signature)}`;
 }
 
-export function loadReplyPreferences(): ReplyPreferenceRecord[] {
-  if (typeof window === 'undefined') return [];
-  return parseReplyPreferences(localStorage.getItem(REPLY_PREFERENCES_STORAGE_KEY))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+export async function loadReplyPreferences(): Promise<ReplyPreferenceRecord[]> {
+  return loadStoredReplyPreferences();
 }
 
-export function upsertReplyPreference(
+export async function upsertReplyPreference(
   entry: Omit<ReplyPreferenceRecord, 'createdAt' | 'updatedAt'>,
-): ReplyPreferenceRecord[] {
-  const current = loadReplyPreferences();
+): Promise<ReplyPreferenceRecord[]> {
+  const current = await loadReplyPreferences();
   const existing = current.find((item) => item.id === entry.id);
   const now = Date.now();
   const nextEntry: ReplyPreferenceRecord = {
@@ -120,16 +122,14 @@ export function upsertReplyPreference(
   return persistReplyPreferences(next);
 }
 
-export function removeReplyPreference(id: string): ReplyPreferenceRecord[] {
-  const next = loadReplyPreferences().filter((entry) => entry.id !== id);
+export async function removeReplyPreference(id: string): Promise<ReplyPreferenceRecord[]> {
+  const next = (await loadReplyPreferences()).filter((entry) => entry.id !== id);
   return persistReplyPreferences(next);
 }
 
-export function clearReplyPreferences(): ReplyPreferenceRecord[] {
-  if (typeof window === 'undefined') return [];
-  localStorage.removeItem(REPLY_PREFERENCES_STORAGE_KEY);
-  window.dispatchEvent(new Event(REPLY_PREFERENCES_UPDATED_EVENT));
-  return [];
+export async function clearReplyPreferences(): Promise<ReplyPreferenceRecord[]> {
+  const cleared = await persistReplyPreferences([]);
+  return cleared;
 }
 
 function scorePreference(

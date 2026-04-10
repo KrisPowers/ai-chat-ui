@@ -11,19 +11,21 @@ import type { ReplyPreferenceRecord } from '../types';
 export function useReplyPreferences() {
   const [replyPreferences, setReplyPreferences] = useState<ReplyPreferenceRecord[]>([]);
 
-  const refresh = useCallback(() => {
-    setReplyPreferences(loadReplyPreferences());
+  const refresh = useCallback(async () => {
+    setReplyPreferences(await loadReplyPreferences());
   }, []);
 
   useEffect(() => {
-    refresh();
+    void refresh();
 
     const handleStorage = (event: StorageEvent) => {
       if (!event.key || event.key === REPLY_PREFERENCES_STORAGE_KEY) {
-        refresh();
+        void refresh();
       }
     };
-    const handleUpdate = () => refresh();
+    const handleUpdate = () => {
+      void refresh();
+    };
 
     window.addEventListener('storage', handleStorage);
     window.addEventListener(REPLY_PREFERENCES_UPDATED_EVENT, handleUpdate);
@@ -34,13 +36,13 @@ export function useReplyPreferences() {
     };
   }, [refresh]);
 
-  const savePreference = useCallback((entry: Omit<ReplyPreferenceRecord, 'createdAt' | 'updatedAt'>) => {
-    const next = upsertReplyPreference(entry);
+  const savePreference = useCallback(async (entry: Omit<ReplyPreferenceRecord, 'createdAt' | 'updatedAt'>) => {
+    const next = await upsertReplyPreference(entry);
     setReplyPreferences(next);
   }, []);
 
-  const deletePreference = useCallback((id: string) => {
-    const next = removeReplyPreference(id);
+  const deletePreference = useCallback(async (id: string) => {
+    const next = await removeReplyPreference(id);
     setReplyPreferences(next);
   }, []);
 

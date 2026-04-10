@@ -116,6 +116,17 @@ export interface ReplyPreferenceRecord {
   updatedAt: number;
 }
 
+export interface AppSettings {
+  defaultModel: string;
+  defaultChatPreset: string;
+  defaultReasoningEffort: ChatReasoningEffort;
+  developerToolsEnabled: boolean;
+  advancedUseEnabled: boolean;
+  ollamaEndpoint: string;
+  openAIApiKey: string;
+  anthropicApiKey: string;
+}
+
 export interface ChatRecord {
   id: string;
   title: string;
@@ -130,10 +141,39 @@ export interface ChatRecord {
   fileEntries?: FileEntry[];
 }
 
+export interface WorkspaceFileNode {
+  name: string;
+  path: string;
+  kind: 'file' | 'directory';
+  extension?: string;
+  children?: WorkspaceFileNode[];
+}
+
+export interface WorkspaceSnapshot {
+  rootPath: string;
+  fileTree: WorkspaceFileNode[];
+  fileEntries: FileEntry[];
+  fileCount: number;
+  directoryCount: number;
+  syncedAt: number;
+}
+
+export interface WorkspaceSelection {
+  label: string;
+  rootPath: string;
+  snapshot: WorkspaceSnapshot;
+}
+
 export interface ProjectFolder {
   id: string;
   label: string;
   createdAt: number;
+  rootPath?: string;
+  fileTree?: WorkspaceFileNode[];
+  fileCount?: number;
+  directoryCount?: number;
+  syncedAt?: number;
+  archivedAt?: number;
   fileEntries?: FileEntry[];
 }
 
@@ -168,3 +208,12 @@ export interface Panel {
 }
 
 export type OllamaStatus = ModelCatalogStatus;
+export type StorageMode = 'browser' | 'desktop-sql';
+
+export interface PersistedAppSnapshot {
+  settings: AppSettings;
+  workspaces: ProjectFolder[];
+  chats: ChatRecord[];
+  replyPreferences: ReplyPreferenceRecord[];
+  storageMode: StorageMode;
+}

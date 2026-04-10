@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop:dev": "wails dev",
+    "desktop:build": "wails build"
   },
   "dependencies": {
     "react": "^18.3.1",

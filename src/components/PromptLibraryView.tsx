@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { buildWorkspaceGroups } from '../lib/workspaces';
 import { getModelDisplayLabel, getModelDisplayName, getModelProviderLabel, resolveModelHandle } from '../lib/ollama';
+import { isDesktopRuntime } from '../lib/persistence';
 import { PRESETS } from '../lib/presets';
 import { attachmentsToStoredEntries, mergeImportableAttachments, readImportableAttachments, type ImportableAttachment } from '../lib/chatAttachments';
 import type { ChatReasoningEffort, ChatRecord, ProjectFolder, ThreadType } from '../types';
@@ -13,7 +14,6 @@ import {
   IconFolderPlus,
   IconMessageSquare,
   IconTrash2,
-  IconUpload,
 } from './Icon';
 
 type PromptPage = 'landing' | 'chat' | 'code';
@@ -45,7 +45,7 @@ interface Props {
   onStartChat: (options: StartOptions) => boolean;
   onOpenChat: (chat: ChatRecord) => void;
   onCreateChatInFolder: (folder: { id: string; label: string }) => void;
-  onOpenWorkspaceLauncher: (mode?: 'create' | 'import') => void;
+  onOpenWorkspaceLauncher: () => void;
   onDeleteChat: (id: string) => void;
   onDeleteWorkspace: (workspace: { id: string; label: string }) => void;
   onGoToChat?: () => void;
@@ -94,8 +94,8 @@ const PAGE_DEFINITIONS: Record<Exclude<PromptPage, 'landing'>, PageDefinition> =
     requiresWorkspace: true,
     workspaceLabel: 'Workspace',
     workspaceHint: 'Pick the project directory that should own this code chat.',
-    emptyWorkspaceTitle: 'Create or import a workspace first.',
-    emptyWorkspaceHint: 'A workspace acts as the project directory and groups the codebase with the chats that belong to it.',
+    emptyWorkspaceTitle: 'Add a workspace folder first.',
+    emptyWorkspaceHint: 'A workspace is a real local folder on the user device, and it groups that codebase with the chats that belong to it.',
     icon: IconCode2,
   },
 };
@@ -244,6 +244,9 @@ export function PromptLibraryView({
   const libraryOpacity = showLibrary ? Math.min(1, 0.28 + scrollTop / 220) : 0;
   const libraryTranslate = showLibrary ? Math.max(0, 54 - scrollTop / 7) : 0;
   const canLaunch = Boolean(prompt.trim()) && (!definition?.requiresWorkspace || Boolean(selectedWorkspace));
+  const storageHeadline = isDesktopRuntime()
+    ? 'Chats stay in a local SQL database'
+    : 'Chats stay in local IndexedDB';
   const resolvedChatModel = resolveModelHandle(selectedChatModel || defaultModel, models);
   const selectedModelLabel = getModelDisplayLabel(resolveModelHandle(defaultModel, models));
   const selectedChatModelLabel = getModelDisplayLabel(resolvedChatModel);
@@ -399,7 +402,7 @@ export function PromptLibraryView({
             </div>
             <div className="landing-stage-note">
               <span className="landing-note-label">Storage</span>
-              <strong>Chats stay in local IndexedDB</strong>
+              <strong>{storageHeadline}</strong>
             </div>
           </div>
         </section>
@@ -429,7 +432,7 @@ export function PromptLibraryView({
                 <IconFolder size={22} />
               </div>
               <h3>No folders yet</h3>
-              <p>Create a workspace or import a project folder to populate the local library.</p>
+              <p>Add a real project folder to populate the local library.</p>
             </div>
           ) : (
             <div className="drive-folder-grid">
@@ -651,14 +654,9 @@ export function PromptLibraryView({
                     ))}
                   </select>
 
-                  <button className="btn" type="button" onClick={() => onOpenWorkspaceLauncher('create')}>
+                  <button className="btn" type="button" onClick={onOpenWorkspaceLauncher}>
                     <IconFolderPlus size={14} />
-                    <span>New workspace</span>
-                  </button>
-
-                  <button className="btn settings-secondary-btn" type="button" onClick={() => onOpenWorkspaceLauncher('import')}>
-                    <IconUpload size={14} />
-                    <span>Import folder</span>
+                    <span>Add workspace folder</span>
                   </button>
                 </div>
 
@@ -680,13 +678,9 @@ export function PromptLibraryView({
               <strong>{definition.emptyWorkspaceTitle}</strong>
               <p>{definition.emptyWorkspaceHint}</p>
               <div className="route-starter-workspace-row">
-                <button className="btn" type="button" onClick={() => onOpenWorkspaceLauncher('create')}>
+                <button className="btn" type="button" onClick={onOpenWorkspaceLauncher}>
                   <IconFolderPlus size={14} />
-                  <span>New workspace</span>
-                </button>
-                <button className="btn settings-secondary-btn" type="button" onClick={() => onOpenWorkspaceLauncher('import')}>
-                  <IconUpload size={14} />
-                  <span>Import folder</span>
+                  <span>Add workspace folder</span>
                 </button>
               </div>
             </div>
@@ -1123,18 +1117,10 @@ export function PromptLibraryView({
                 <button
                   type="button"
                   className="launch-action-btn"
-                  onClick={() => onOpenWorkspaceLauncher('create')}
+                  onClick={onOpenWorkspaceLauncher}
                 >
                   <IconFolderPlus size={15} />
-                  <span>New workspace</span>
-                </button>
-                <button
-                  type="button"
-                  className="launch-action-btn"
-                  onClick={() => onOpenWorkspaceLauncher('import')}
-                >
-                  <IconUpload size={15} />
-                  <span>Import folder</span>
+                  <span>Add workspace folder</span>
                 </button>
               </div>
             ) : (
@@ -1145,18 +1131,10 @@ export function PromptLibraryView({
                   <button
                     type="button"
                     className="launch-action-btn"
-                    onClick={() => onOpenWorkspaceLauncher('create')}
+                    onClick={onOpenWorkspaceLauncher}
                   >
                     <IconFolderPlus size={15} />
-                    <span>New workspace</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="launch-action-btn"
-                    onClick={() => onOpenWorkspaceLauncher('import')}
-                  >
-                    <IconUpload size={15} />
-                    <span>Import folder</span>
+                    <span>Add workspace folder</span>
                   </button>
                 </div>
               </div>

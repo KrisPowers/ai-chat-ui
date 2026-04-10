@@ -1,3 +1,4 @@
+import { getCachedSettings, saveAppSettings } from './persistence';
 import type { Message, ModelProvider, ModelProviderState } from '../types';
 
 export const DEFAULT_OLLAMA_BASE = 'http://localhost:11434';
@@ -103,32 +104,15 @@ interface DecodedModelHandle {
   modelId: string;
 }
 
-function getStoredValue(key: string): string {
-  if (typeof window === 'undefined') return '';
-
-  try {
-    return localStorage.getItem(key)?.trim() ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function setStoredValue(key: string, value: string): string {
-  const trimmed = value.trim();
-
-  if (typeof window !== 'undefined') {
-    try {
-      if (trimmed) {
-        localStorage.setItem(key, trimmed);
-      } else {
-        localStorage.removeItem(key);
-      }
-    } catch {
-      // ignore storage failures and still return the trimmed value
-    }
-  }
-
-  return trimmed;
+async function persistSettingsPatch(patch: Partial<Pick<
+  ReturnType<typeof getCachedSettings>,
+  'ollamaEndpoint' | 'openAIApiKey' | 'anthropicApiKey'
+>>) {
+  const current = getCachedSettings();
+  await saveAppSettings({
+    ...current,
+    ...patch,
+  });
 }
 
 function isLikelyTextModelId(modelId: string): boolean {
@@ -219,45 +203,33 @@ export function normalizeOllamaBase(value?: string | null): string {
 }
 
 export function getOllamaBase(): string {
-  if (typeof window === 'undefined') {
-    return normalizeOllamaBase(ENV_OLLAMA_BASE);
-  }
-
-  try {
-    return normalizeOllamaBase(localStorage.getItem(OLLAMA_BASE_STORAGE_KEY) ?? ENV_OLLAMA_BASE);
-  } catch {
-    return normalizeOllamaBase(ENV_OLLAMA_BASE);
-  }
+  return normalizeOllamaBase(getCachedSettings().ollamaEndpoint || ENV_OLLAMA_BASE);
 }
 
-export function setOllamaBase(value: string): string {
+export async function setOllamaBase(value: string): Promise<string> {
   const normalized = normalizeOllamaBase(value);
-
-  if (typeof window !== 'undefined') {
-    try {
-      localStorage.setItem(OLLAMA_BASE_STORAGE_KEY, normalized);
-    } catch {
-      // ignore storage failures and still return the normalized value
-    }
-  }
-
+  await persistSettingsPatch({ ollamaEndpoint: normalized });
   return normalized;
 }
 
 export function getOpenAIApiKey(): string {
-  return getStoredValue(OPENAI_API_KEY_STORAGE_KEY);
+  return getCachedSettings().openAIApiKey;
 }
 
-export function setOpenAIApiKey(value: string): string {
-  return setStoredValue(OPENAI_API_KEY_STORAGE_KEY, value);
+export async function setOpenAIApiKey(value: string): Promise<string> {
+  const trimmed = value.trim();
+  await persistSettingsPatch({ openAIApiKey: trimmed });
+  return trimmed;
 }
 
 export function getAnthropicApiKey(): string {
-  return getStoredValue(ANTHROPIC_API_KEY_STORAGE_KEY);
+  return getCachedSettings().anthropicApiKey;
 }
 
-export function setAnthropicApiKey(value: string): string {
-  return setStoredValue(ANTHROPIC_API_KEY_STORAGE_KEY, value);
+export async function setAnthropicApiKey(value: string): Promise<string> {
+  const trimmed = value.trim();
+  await persistSettingsPatch({ anthropicApiKey: trimmed });
+  return trimmed;
 }
 
 export function buildModelHandle(provider: ModelProvider, modelId: string): string {
